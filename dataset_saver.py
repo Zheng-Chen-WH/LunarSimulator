@@ -23,6 +23,10 @@ class DatasetSaver:
         self.nav_camera_params = args['nav_camera_params']
         self.obstacle_camera_params = args['obstacle_camera_params']
         self.imu_params = args['imu_params']
+        self.star_tracker_params = args.get('star_tracker_params', {
+            'xy_precision_sigma': 4.85e-6,
+            'z_precision_sigma': 4.85e-5
+        })
         
         # 创建保存目录
         self.base_path = Path(self.dataset_params['save_path'])
@@ -115,23 +119,24 @@ class DatasetSaver:
             timestamp_ns = int(data_frame['timestamp'] * 1e9)
             
             # 保存相机图像
-            if 'nav_camera' in data_frame:
-                nav_data = data_frame['nav_camera']
-                cam_ts = int(nav_data['timestamp'] * 1e9)
-                
-                # cam0: 导航左
-                if 'left_rgb' in nav_data:
-                    filename = f"{cam_ts}.png"
-                    img_path = mav_path / "cam0" / "data" / filename
-                    cv2.imwrite(str(img_path), cv2.cvtColor(nav_data['left_rgb'], cv2.COLOR_RGB2BGR))
-                    cam_csv_files['cam0'].write(f"{cam_ts},{filename}\n")
-                
-                # cam1: 导航右
-                if 'right_rgb' in nav_data:
-                    filename = f"{cam_ts}.png"
-                    img_path = mav_path / "cam1" / "data" / filename
-                    cv2.imwrite(str(img_path), cv2.cvtColor(nav_data['right_rgb'], cv2.COLOR_RGB2BGR))
-                    cam_csv_files['cam1'].write(f"{cam_ts},{filename}\n")
+            # [已注释 - 导航相机现阶段暂时用不到]
+            # if 'nav_camera' in data_frame:
+            #     nav_data = data_frame['nav_camera']
+            #     cam_ts = int(nav_data['timestamp'] * 1e9)
+            #     
+            #     # cam0: 导航左
+            #     if 'left_rgb' in nav_data:
+            #         filename = f"{cam_ts}.png"
+            #         img_path = mav_path / "cam0" / "data" / filename
+            #         cv2.imwrite(str(img_path), cv2.cvtColor(nav_data['left_rgb'], cv2.COLOR_RGB2BGR))
+            #         cam_csv_files['cam0'].write(f"{cam_ts},{filename}\n")
+            #     
+            #     # cam1: 导航右
+            #     if 'right_rgb' in nav_data:
+            #         filename = f"{cam_ts}.png"
+            #         img_path = mav_path / "cam1" / "data" / filename
+            #         cv2.imwrite(str(img_path), cv2.cvtColor(nav_data['right_rgb'], cv2.COLOR_RGB2BGR))
+            #         cam_csv_files['cam1'].write(f"{cam_ts},{filename}\n")
             
             if 'obstacle_camera' in data_frame:
                 obs_data = data_frame['obstacle_camera']
@@ -335,11 +340,10 @@ class DatasetSaver:
         cosy_cosp = 1 - 2 * (y * y + z * z)
         yaw = np.arctan2(siny_cosp, cosy_cosp)
         
-        # 添加噪声（星敏感器精度约0.001度）
-        angle_noise = 1.5e-4  # rad (约0.001度)
-        roll_noisy = roll + np.random.randn() * angle_noise
-        pitch_noisy = pitch + np.random.randn() * angle_noise
-        yaw_noisy = yaw + np.random.randn() * angle_noise
+        # 自航向(Yaw)角通常精度较低 (30 arcsec)
+        roll_noisy = roll + np.random.randn() * self.star_tracker_params['xy_precision_sigma']
+        pitch_noisy = pitch + np.random.randn() * self.star_tracker_params['xy_precision_sigma']
+        yaw_noisy = yaw + np.random.randn() * self.star_tracker_params['z_precision_sigma']
         
         # 转换回四元数
         cy = np.cos(yaw_noisy * 0.5)
@@ -424,19 +428,20 @@ class DatasetSaver:
             }
             
             # 保存相机数据
-            if 'nav_camera' in data_frame:
-                nav_data = data_frame['nav_camera']
-                if 'left_rgb' in nav_data:
-                    img_path = f"nav_camera_left/{idx:06d}.png"
-                    cv2.imwrite(str(self.dataset_path / img_path),
-                              cv2.cvtColor(nav_data['left_rgb'], cv2.COLOR_RGB2BGR))
-                    frame_info['nav_left'] = img_path
-                
-                if 'right_rgb' in nav_data:
-                    img_path = f"nav_camera_right/{idx:06d}.png"
-                    cv2.imwrite(str(self.dataset_path / img_path),
-                              cv2.cvtColor(nav_data['right_rgb'], cv2.COLOR_RGB2BGR))
-                    frame_info['nav_right'] = img_path
+            # [已注释 - 导航相机现阶段暂时用不到]
+            # if 'nav_camera' in data_frame:
+            #     nav_data = data_frame['nav_camera']
+            #     if 'left_rgb' in nav_data:
+            #         img_path = f"nav_camera_left/{idx:06d}.png"
+            #         cv2.imwrite(str(self.dataset_path / img_path),
+            #                   cv2.cvtColor(nav_data['left_rgb'], cv2.COLOR_RGB2BGR))
+            #         frame_info['nav_left'] = img_path
+            #     
+            #     if 'right_rgb' in nav_data:
+            #         img_path = f"nav_camera_right/{idx:06d}.png"
+            #         cv2.imwrite(str(self.dataset_path / img_path),
+            #                   cv2.cvtColor(nav_data['right_rgb'], cv2.COLOR_RGB2BGR))
+            #         frame_info['nav_right'] = img_path
             
             if 'obstacle_camera' in data_frame:
                 obs_data = data_frame['obstacle_camera']
@@ -461,12 +466,11 @@ class DatasetSaver:
                     'orientation': data_frame['imu']['orientation'].tolist()
                 }
             
-            # 保存轮速数据
+            # 保存轮速数据（四个车轮各自的线速度）
             if 'wheel_encoder' in data_frame:
                 frame_info['wheel_encoder'] = {
                     'timestamp': data_frame['wheel_encoder']['timestamp'],
-                    'wheel_speeds': data_frame['wheel_encoder']['wheel_speeds'].tolist(),
-                    'encoder_counts': data_frame['wheel_encoder']['encoder_counts'].tolist()
+                    'wheel_linear_speeds': data_frame['wheel_encoder']['wheel_linear_speeds'].tolist()  # 四轮线速度 [FL, FR, RL, RR] (m/s)
                 }
             
             # 保存真值位姿
@@ -506,6 +510,9 @@ class DatasetSaver:
         bag_path = self.dataset_path / "dataset.bag"
         self.dataset_path.mkdir(parents=True, exist_ok=True)
         
+        print(f"准备写入ROS bag: {bag_path}")
+        print("注意：请勿在写入过程中强制中断程序，否则会导致bag文件损坏")
+        
         # 获取类型存储
         typestore = get_typestore(Stores.ROS1_NOETIC)
         
@@ -517,6 +524,7 @@ class DatasetSaver:
         geometry_msgs_TwistStamped = typestore.types['geometry_msgs/msg/TwistStamped']
         geometry_msgs_QuaternionStamped = typestore.types['geometry_msgs/msg/QuaternionStamped']
         geometry_msgs_PoseWithCovariance = typestore.types['geometry_msgs/msg/PoseWithCovariance']
+        geometry_msgs_PoseWithCovarianceStamped = typestore.types['geometry_msgs/msg/PoseWithCovarianceStamped']
         geometry_msgs_TwistWithCovariance = typestore.types['geometry_msgs/msg/TwistWithCovariance']
         std_msgs_Header = typestore.types['std_msgs/msg/Header']
         geometry_msgs_Point = typestore.types['geometry_msgs/msg/Point']
@@ -547,17 +555,17 @@ class DatasetSaver:
                 typestore=typestore
             )
             
-            # 导航相机（可选，供额外视觉里程计使用）
-            conn_nav_left = writer.add_connection(
-                '/nav_camera/left/image_raw',
-                sensor_msgs_Image.__msgtype__,
-                typestore=typestore
-            )
-            conn_nav_right = writer.add_connection(
-                '/nav_camera/right/image_raw',
-                sensor_msgs_Image.__msgtype__,
-                typestore=typestore
-            )
+            # 导航相机（可选，供额外视觉里程计使用）[已注释 - 现阶段暂时用不到]
+            # conn_nav_left = writer.add_connection(
+            #     '/nav_camera/left/image_raw',
+            #     sensor_msgs_Image.__msgtype__,
+            #     typestore=typestore
+            # )
+            # conn_nav_right = writer.add_connection(
+            #     '/nav_camera/right/image_raw',
+            #     sensor_msgs_Image.__msgtype__,
+            #     typestore=typestore
+            # )
             
             # IMU（供VINS和EKF使用）
             conn_imu = writer.add_connection(
@@ -569,11 +577,12 @@ class DatasetSaver:
             # 模拟星敏感器（姿态测量，供EKF使用）
             conn_star_tracker = writer.add_connection(
                 '/star_tracker/attitude',
-                geometry_msgs_QuaternionStamped.__msgtype__,
+                geometry_msgs_PoseWithCovarianceStamped.__msgtype__,
                 typestore=typestore
             )
             
-            # 模拟轮速计（速度测量，供EKF使用）- 使用Odometry避免兼容性问题
+            # 轮速计（线速度测量，供EKF使用）
+            # 注意: 修改为 Odometry 类型，包含积分后的位置信息
             conn_wheel_odom = writer.add_connection(
                 '/wheel_odometry',
                 nav_msgs_Odometry.__msgtype__,
@@ -594,64 +603,70 @@ class DatasetSaver:
                 typestore=typestore
             )
             
+            # 初始化轮速计积分状态 (Dead Reckoning)
+            # 假设起始位置为 (0,0,0) world frame，或者与真值初始位置对齐
+            # 这里我们为了模拟 "相对位移积分"，从0开始累加
+            sim_odom_pos = np.zeros(3)  # x, y, z
+            last_timestamp_ns = None
+
             for idx, data_frame in enumerate(dataset['data']):
                 # 转换时间戳为纳秒
                 timestamp_ns = int(data_frame['timestamp'] * 1e9)
                 
-                # 导航相机图像
-                if 'nav_camera' in data_frame:
-                    nav_data = data_frame['nav_camera']
-                    cam_timestamp_ns = int(nav_data['timestamp'] * 1e9)
-                    
-                    if 'left_rgb' in nav_data:
-                        img = nav_data['left_rgb']
-                        height, width = img.shape[:2]
-                        
-                        header = std_msgs_Header(
-                            seq=idx,
-                            stamp=Time(
-                                sec=int(cam_timestamp_ns // 1000000000),
-                                nanosec=int(cam_timestamp_ns % 1000000000)
-                            ),
-                            frame_id='nav_camera_left'
-                        )
-                        
-                        img_msg = sensor_msgs_Image(
-                            header=header,
-                            height=height,
-                            width=width,
-                            encoding='rgb8',
-                            is_bigendian=0,
-                            step=width * 3,
-                            data=np.ascontiguousarray(img).flatten()
-                        )
-                        
-                        writer.write(conn_nav_left, cam_timestamp_ns, typestore.serialize_ros1(img_msg, img_msg.__msgtype__))
-                    
-                    if 'right_rgb' in nav_data:
-                        img = nav_data['right_rgb']
-                        height, width = img.shape[:2]
-                        
-                        header = std_msgs_Header(
-                            seq=idx,
-                            stamp=Time(
-                                sec=int(cam_timestamp_ns // 1000000000),
-                                nanosec=int(cam_timestamp_ns % 1000000000)
-                            ),
-                            frame_id='nav_camera_right'
-                        )
-                        
-                        img_msg = sensor_msgs_Image(
-                            header=header,
-                            height=height,
-                            width=width,
-                            encoding='rgb8',
-                            is_bigendian=0,
-                            step=width * 3,
-                            data=np.ascontiguousarray(img).flatten()
-                        )
-                        
-                        writer.write(conn_nav_right, cam_timestamp_ns, typestore.serialize_ros1(img_msg, img_msg.__msgtype__))
+                # 导航相机图像 [已注释 - 现阶段暂时用不到]
+                # if 'nav_camera' in data_frame:
+                #     nav_data = data_frame['nav_camera']
+                #     cam_timestamp_ns = int(nav_data['timestamp'] * 1e9)
+                #     
+                #     if 'left_rgb' in nav_data:
+                #         img = nav_data['left_rgb']
+                #         height, width = img.shape[:2]
+                #         
+                #         header = std_msgs_Header(
+                #             seq=idx,
+                #             stamp=Time(
+                #                 sec=int(cam_timestamp_ns // 1000000000),
+                #                 nanosec=int(cam_timestamp_ns % 1000000000)
+                #             ),
+                #             frame_id='nav_camera_left'
+                #         )
+                #         
+                #         img_msg = sensor_msgs_Image(
+                #             header=header,
+                #             height=height,
+                #             width=width,
+                #             encoding='rgb8',
+                #             is_bigendian=0,
+                #             step=width * 3,
+                #             data=np.ascontiguousarray(img).flatten()
+                #         )
+                #         
+                #         writer.write(conn_nav_left, cam_timestamp_ns, typestore.serialize_ros1(img_msg, img_msg.__msgtype__))
+                #     
+                #     if 'right_rgb' in nav_data:
+                #         img = nav_data['right_rgb']
+                #         height, width = img.shape[:2]
+                #         
+                #         header = std_msgs_Header(
+                #             seq=idx,
+                #             stamp=Time(
+                #                 sec=int(cam_timestamp_ns // 1000000000),
+                #                 nanosec=int(cam_timestamp_ns % 1000000000)
+                #             ),
+                #             frame_id='nav_camera_right'
+                #         )
+                #         
+                #         img_msg = sensor_msgs_Image(
+                #             header=header,
+                #             height=height,
+                #             width=width,
+                #             encoding='rgb8',
+                #             is_bigendian=0,
+                #             step=width * 3,
+                #             data=np.ascontiguousarray(img).flatten()
+                #         )
+                #         
+                #         writer.write(conn_nav_right, cam_timestamp_ns, typestore.serialize_ros1(img_msg, img_msg.__msgtype__))
                 
                 # 避障相机图像（供VINS使用）
                 if 'obstacle_camera' in data_frame:
@@ -668,7 +683,7 @@ class DatasetSaver:
                                 sec=int(cam_timestamp_ns // 1000000000),
                                 nanosec=int(cam_timestamp_ns % 1000000000)
                             ),
-                            frame_id='obstacle_camera_left'
+                            frame_id='camera_left'
                         )
                         
                         img_msg = sensor_msgs_Image(
@@ -693,7 +708,7 @@ class DatasetSaver:
                                 sec=int(cam_timestamp_ns // 1000000000),
                                 nanosec=int(cam_timestamp_ns % 1000000000)
                             ),
-                            frame_id='obstacle_camera_right'
+                            frame_id='camera_right'
                         )
                         
                         img_msg = sensor_msgs_Image(
@@ -719,7 +734,7 @@ class DatasetSaver:
                             sec=int(imu_timestamp_ns // 1000000000),
                             nanosec=int(imu_timestamp_ns % 1000000000)
                         ),
-                        frame_id='imu'
+                        frame_id='body'
                     )
                     
                     imu_msg = sensor_msgs_Imu(
@@ -802,64 +817,169 @@ class DatasetSaver:
                     # 3. 模拟星敏感器（姿态 + 高精度噪声）
                     noisy_quaternion = self.simulate_star_tracker(state['quaternion'])
                     
-                    star_tracker_msg = geometry_msgs_QuaternionStamped(
+                    # 修改：EKF 期望的 Pose 输入是 PoseWithCovarianceStamped 或者是 PoseStamped
+                    # robot_localization 不直接支持 QuaternionStamped 作为输入进入 pose0 接口（除非是 IMU 接口）
+                    # 为了兼容性，我们将星敏感器数据封装为 PoseWithCovarianceStamped (位置设为0或不使用)
+                    
+                    star_tracker_msg = geometry_msgs_PoseWithCovarianceStamped(
                         header=header,
-                        quaternion=geometry_msgs_Quaternion(
-                            w=float(noisy_quaternion[0]),
-                            x=float(noisy_quaternion[1]),
-                            y=float(noisy_quaternion[2]),
-                            z=float(noisy_quaternion[3])
+                        pose=geometry_msgs_PoseWithCovariance(
+                            pose=geometry_msgs_Pose(
+                                position=geometry_msgs_Point(x=0.0, y=0.0, z=0.0), # 不使用位置
+                                orientation=geometry_msgs_Quaternion(
+                                    w=float(noisy_quaternion[0]),
+                                    x=float(noisy_quaternion[1]),
+                                    y=float(noisy_quaternion[2]),
+                                    z=float(noisy_quaternion[3])
+                                )
+                            ),
+                            covariance=np.array([
+                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                0.0, 0.0, 0.0, self.star_tracker_params['xy_precision_sigma']**2, 0.0, 0.0,
+                                0.0, 0.0, 0.0, 0.0, self.star_tracker_params['xy_precision_sigma']**2, 0.0,
+                                0.0, 0.0, 0.0, 0.0, 0.0, self.star_tracker_params['z_precision_sigma']**2
+                            ], dtype=np.float64)
                         )
                     )
                     
                     writer.write(conn_star_tracker, timestamp_ns, typestore.serialize_ros1(star_tracker_msg, star_tracker_msg.__msgtype__))
                     
-                    # 4. 模拟轮速计（速度 + 噪声）- 使用Odometry消息
-                    wheel_data = self.simulate_wheel_odometry(state['velocity'], state['angular_velocity'])
+                    # 4. 轮速计 (模拟)
+                    # 按照用户需求：基于真值速度积分得到路径长度，结合星敏感器姿态推算位置 (Dead Reckoning)
+                    # 输出 nav_msgs/Odometry，包含 Pose (积分得到) 和 Twist (模拟测量)
+                if 'state' in data_frame:
+                    state = data_frame['state']
                     
-                    wheel_odom_msg = nav_msgs_Odometry(
-                        header=header,
-                        child_frame_id='base_link',
+                    # 使用当前帧时间戳
+                    wheel_timestamp_ns = timestamp_ns
+                    
+                    # 计算 dt
+                    if last_timestamp_ns is None:
+                        dt = 0.0
+                    else:
+                        dt = (wheel_timestamp_ns - last_timestamp_ns) / 1e9
+                    last_timestamp_ns = wheel_timestamp_ns
+                    
+                    # --- A. 计模拟速度测量 (Twist) ---
+                    # AirSim 返回的速度是 World Frame 下的 [vx, vy, vz]
+                    v_world = np.array(state['velocity'])
+                    
+                    # 获取姿态四元数 [w, x, y, z] ---> 旋转矩阵 R_bw (World->Body)
+                    q = state['quaternion'] 
+                    q_w, q_x, q_y, q_z = q
+                    R_wb = np.array([
+                        [1-2*(q_y**2+q_z**2), 2*(q_x*q_y-q_z*q_w), 2*(q_x*q_z+q_y*q_w)],
+                        [2*(q_x*q_y+q_z*q_w), 1-2*(q_x**2+q_z**2), 2*(q_y*q_z-q_x*q_w)],
+                        [2*(q_x*q_z-q_y*q_w), 2*(q_y*q_z+q_x*q_w), 1-2*(q_x**2+q_y**2)]
+                    ])
+                    R_bw = R_wb.T
+                    
+                    v_body = R_bw @ v_world
+                    
+                    # 添加轮速计噪声 (模拟打滑和测量误差)
+                    noise_sigma = 0.02 # 2cm/s 的噪声
+                    vx_noisy = v_body[0] + np.random.randn() * noise_sigma
+                    
+                    # 非完整约束，lateral 速度为 0 (带微小噪声)
+                    vy_noisy = 0.0 + np.random.randn() * 0.001 
+                    
+                    if np.random.rand() < 0.05: # 模拟打滑
+                        vx_noisy *= 0.9
+
+                    # --- B. 积分计算位置 (Dead Reckoning Pose) ---
+                    # 轮速计只能测量前进距离 ds = vx * dt
+                    ds = vx_noisy * dt
+                    
+                    # 使用星敏感器(或IMU融合)的姿态进行航位推算
+                    # 这里直接复用上一步生成的 noisy_quaternion (模拟星敏感器读数) 作为当前姿态
+                    # 注意：noisy_quaternion 是 World Frame 下的姿态
+                    # 如果要进行 Dead Reckoning: P_k = P_{k-1} + R_{noisy} * [ds, 0, 0]^T
+                    
+                    # 将 Noisy Quaternion 转为旋转矩阵 R_noisy
+                    nq_w, nq_x, nq_y, nq_z = noisy_quaternion
+                    R_noisy = np.array([
+                        [1-2*(nq_y**2+nq_z**2), 2*(nq_x*nq_y-nq_z*nq_w), 2*(nq_x*nq_z+nq_y*nq_w)],
+                        [2*(nq_x*nq_y+nq_z*nq_w), 1-2*(nq_x**2+nq_z**2), 2*(nq_y*nq_z-nq_x*nq_w)],
+                        [2*(nq_x*nq_z-nq_y*nq_w), 2*(nq_y*nq_z+nq_x*nq_w), 1-2*(nq_x**2+nq_y**2)]
+                    ])
+                    
+                    # 计算在 World Frame 下的增量 displacement
+                    d_pos_body = np.array([ds, 0.0, 0.0])
+                    d_pos_world = R_noisy @ d_pos_body
+                    
+                    # 累加位置
+                    # 注意：如果是第一帧，我们可能希望重置位置，或者就从0开始
+                    sim_odom_pos += d_pos_world
+
+                    # [DEBUG] 如果想要直接使用真值位置（加噪声），可以取消下面这段注释：
+                    # pos_noise = np.random.randn(3) * 0.05  # 5cm 位置噪声
+                    # sim_odom_pos = np.array(state['position']) + pos_noise
+                    # ----------------------------------------------------
+
+                    # --- C. 构建 Odometry 消息 ---
+                    odom_msg = nav_msgs_Odometry(
+                        header=std_msgs_Header(
+                            seq=idx,
+                            stamp=Time(
+                                sec=int(wheel_timestamp_ns // 1000000000),
+                                nanosec=int(wheel_timestamp_ns % 1000000000)
+                            ),
+                            frame_id='world'  # 修改：月球车在世界系下积分
+                        ),
+                        child_frame_id='body',
                         pose=geometry_msgs_PoseWithCovariance(
                             pose=geometry_msgs_Pose(
-                                position=geometry_msgs_Point(x=0.0, y=0.0, z=0.0),
-                                orientation=geometry_msgs_Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
+                                position=geometry_msgs_Point(
+                                    x=float(sim_odom_pos[0]), 
+                                    y=float(sim_odom_pos[1]), 
+                                    z=float(sim_odom_pos[2])
+                                ),
+                                orientation=geometry_msgs_Quaternion(
+                                    w=float(noisy_quaternion[0]),
+                                    x=float(noisy_quaternion[1]),
+                                    y=float(noisy_quaternion[2]),
+                                    z=float(noisy_quaternion[3])
+                                )
                             ),
-                            covariance=np.zeros(36, dtype=np.float64)
+                            covariance=np.zeros(36, dtype=np.float64) # 简化，设为0
                         ),
                         twist=geometry_msgs_TwistWithCovariance(
                             twist=geometry_msgs_Twist(
                                 linear=geometry_msgs_Vector3(
-                                    x=float(wheel_data['linear_velocity'][0]),
-                                    y=float(wheel_data['linear_velocity'][1]),
-                                    z=float(wheel_data['linear_velocity'][2])
+                                    x=float(vx_noisy),
+                                    y=float(vy_noisy),
+                                    z=0.0
                                 ),
-                                angular=geometry_msgs_Vector3(
-                                    x=float(wheel_data['angular_velocity'][0]),
-                                    y=float(wheel_data['angular_velocity'][1]),
-                                    z=float(wheel_data['angular_velocity'][2])
+                                angular=geometry_msgs_Vector3( # 轮速计通常不提供角速度，或者信度低
+                                    x=0.0, y=0.0, z=0.0
                                 )
                             ),
                             covariance=np.zeros(36, dtype=np.float64)
                         )
                     )
                     
-                    writer.write(conn_wheel_odom, timestamp_ns, typestore.serialize_ros1(wheel_odom_msg, wheel_odom_msg.__msgtype__))
+                    writer.write(conn_wheel_odom, wheel_timestamp_ns, typestore.serialize_ros1(odom_msg, odom_msg.__msgtype__))
                 
                 if (idx + 1) % 100 == 0:
                     print(f"  已写入 {idx + 1}/{len(dataset['data'])} 帧")
+            
+            print("正在关闭bag文件并写入索引...")
         
-        print(f"ROS bag保存完成: {bag_path}")
+        print(f"✓ ROS bag保存完成: {bag_path}")
+        print(f"  文件大小: {bag_path.stat().st_size / 1024 / 1024:.2f} MB")
+        print(f"\n验证bag文件:")
+        print(f"  rosbag info {bag_path.name}")
         print(f"提示: 可以使用 rosbag info 查看topic信息")
         print(f"\nROS bag包含以下topic：")
-        print(f"  - /cam0/image_raw                        (左目，供VINS使用)")
-        print(f"  - /cam1/image_raw                        (右目，供VINS使用)")
-        print(f"  - /nav_camera/left|right/image_raw       (可选)")
-        print(f"  - /imu0                                   (IMU数据)")
-        print(f"  - /star_tracker/attitude                 (姿态测量)")
-        print(f"  - /wheel_odometry/twist                  (速度测量)")
-        print(f"  - /ground_truth/pose                     (位姿真值)")
-        print(f"  - /ground_truth/twist                    (速度真值)")
+        print(f"  - /cam0/image_raw                        (避障相机左目，供VINS使用)")
+        print(f"  - /cam1/image_raw                        (避障相机右目，供VINS使用)")
+        print(f"  - /imu0                                   (IMU数据，供VINS和EKF使用)")
+        print(f"  - /star_tracker/attitude                 (姿态测量，供EKF使用)")
+        print(f"  - /wheel_odometry                        (轮速计里程计，含位置积分与线速度)")
+        print(f"  - /ground_truth/pose                     (位姿真值，用于评估)")
+        print(f"  - /ground_truth/twist                    (速度真值，用于评估)")
 
 
 # if __name__ == "__main__":

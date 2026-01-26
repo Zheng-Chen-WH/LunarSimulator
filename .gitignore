@@ -1,0 +1,6 @@
+__pycache__/
+runs/
+*.pt
+*.tfevents.*
+dataset/
+__pycache__/

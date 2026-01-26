@@ -1,6 +1,4 @@
-import numpy as np
-import torch
-import torch.nn as nn
+
 # ============================================
 # 月球车传感器配置参数
 # ============================================
@@ -24,7 +22,7 @@ nav_camera_params = {
     'pitch_angle': 0,                      # 俯仰角 (度)
     'resolution': (752, 480),              # 图像分辨率 (width, height)
     'fov': 90,                             # 视场角 (度)
-    'fps': 30,                             # 采样频率 (Hz)
+    'fps': 5,                             # 采样频率 (Hz)
     'image_types': ['Scene', 'DepthPlanar', 'Segmentation'],  # 采集的图像类型
 }
 
@@ -37,19 +35,19 @@ obstacle_camera_params = {
     'pitch_angle': 15,                     # 俯仰角 (度，向下倾斜)
     'resolution': (640, 480),              # 图像分辨率 (width, height)
     'fov': 60,                             # 视场角 (度)
-    'fps': 30,                             # 采样频率 (Hz)
+    'fps': 5,                             # 采样频率 (Hz)
     'image_types': ['Scene', 'DepthPlanar'],  # 采集的图像类型
 }
 
 # IMU参数
 imu_params = {
     'position': (0.0, 0.0, 0.0),           # IMU位置（车体中心）
-    'sampling_rate': 200,                  # 采样频率 (Hz)
-    # 噪声参数（符合VIO标定格式）
-    'accel_noise_sigma': 0.02,             # 加速度计噪声标准差 (m/s^2)
-    'accel_bias_sigma': 0.001,             # 加速度计偏置标准差 (m/s^2)
-    'gyro_noise_sigma': 0.001,             # 陀螺仪噪声标准差 (rad/s)
-    'gyro_bias_sigma': 0.0001,             # 陀螺仪偏置标准差 (rad/s)
+    'sampling_rate': 60,                   # 修改为实际采集频率 60Hz
+    # 噪声参数（对标真实硬件：1°/h 零偏，0.02°/√h 随机游走）
+    'accel_noise_sigma': 0.0,       # 实际性能：0.003，但airsim比这个高；降低加速度计噪声（对标高精度 MEMS）
+    'accel_bias_sigma': 0.0,        # 实际性能：0.0001 降低加速度计偏置影响 (约 10ug)
+    'gyro_noise_sigma': 0.0,        # 实际性能：0.000045 陀螺仪白噪声 (对应 0.02 deg/sqrt(h) @ 60Hz)
+    'gyro_bias_sigma': 0.0,         # 实际性能：0.000005 陀螺仪零偏 (对应 1.03 deg/h，接近硬件图表)
 }
 
 # 轮速计参数
@@ -59,6 +57,16 @@ wheel_encoder_params = {
     'noise_std': 0.01,                     # 轮速噪声标准差（比例）
     'slip_probability': 0.05,              # 打滑概率
     'slip_factor_range': (0.8, 1.2),       # 打滑时速度因子范围
+}
+
+# 星敏感器参数
+star_tracker_params = {
+    'sampling_rate': 10,                   # 采样频率 (Hz)
+    # 精度参数 (对标实际硬件：0.1°/s 动态条件下)
+    # X/Y 精度 3" (3-sigma) -> 1" (1-sigma) -> 4.85e-6 rad
+    'xy_precision_sigma': 4.85e-6,         # X/Y 轴指向精度 (rad)
+    # Z 轴测角精度 30" (3-sigma) -> 10" (1-sigma) -> 4.85e-5 rad
+    'z_precision_sigma': 4.85e-5,          # Z 轴(滚转)精度 (rad)
 }
 
 # 轨迹生成参数（保留用于可选的自动导航功能）

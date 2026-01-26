@@ -7,6 +7,8 @@ import argparse
 from lunar_rover_env import LunarRoverEnv
 from dataset_saver import DatasetSaver
 import config as cfg
+import time
+import msvcrt
 
 # parser = argparse.ArgumentParser(description='月球车VINS数据集采集')
 # parser.add_argument('--seed', type=int, default=42, help='随机种子')
@@ -23,9 +25,9 @@ args={'seed':50, # default=42
       'save_format':'both', # 数据集保存格式：'euroc', 'custom', 'rosbag', 'both'
       'num_runs':1, # 运行次数（生成多个数据集）
       'mode': 'manual', # 采集模式：'manual'(手动驾驶) 或 'auto'(自动导航，暂不可用)
-      'duration': 60, # 手动模式：采集时长(秒)，None表示不限制
-      'distance': 50, # 手动模式：采集距离(米)，None表示不限制
-      'max_frames': 200 # 手动模式：最大帧数，None表示不限制
+      'duration': 10, # 手动模式：采集时长(秒)，None表示不限制
+      'distance': 11.0, # 手动模式：采集距离(米)，None表示不限制
+      'max_frames': 50000 # 手动模式：最大帧数，None表示不限制
       }
 env_args = {'rover_params':cfg.rover_params,
         'nav_camera_params':cfg.nav_camera_params,
@@ -40,7 +42,8 @@ saver_args = {
         'nav_camera_params':cfg.nav_camera_params,
         'obstacle_camera_params':cfg.obstacle_camera_params,
         'imu_params': cfg.imu_params,
-        'wheel_encoder_params': cfg.wheel_encoder_params
+        'wheel_encoder_params': cfg.wheel_encoder_params,
+        'star_tracker_params': cfg.star_tracker_params
         }
 
 print("=" * 60)
@@ -99,8 +102,19 @@ for run_idx in range(args['num_runs']):
             print(f"  ✓ 距离达到 {args['distance']} 米")
         if args['max_frames']:
             print(f"  ✓ 帧数达到 {args['max_frames']} 帧")
-        print()
-        input("按回车键开始采集...")
+            
+        print("\n>>> 请按下 [回车键/Enter] 开始倒计时（5秒后启动录制）...")
+        while True:
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                if key in [b'\r', b'\n']: # 捕获回车键
+                    break
+            time.sleep(0.1) # 略微休息，避免占用CPU
+            
+        for i in range(5, 0, -1):
+            print(f"  系统正在启动中... {i} 秒")
+            time.sleep(1)
+        print(">>> 采集正式开始！")
         
         # 手动驾驶数据采集
         dataset = env.collect_data(

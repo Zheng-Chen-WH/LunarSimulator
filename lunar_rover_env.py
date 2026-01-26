@@ -62,7 +62,7 @@ class LunarRoverEnv:
         self.wheel_encoder_counts = np.zeros(4)  # 四个车轮的编码器计数
         self.last_position = None
         
-        # 时间戳
+        # 时间戳（使用 AirSim 的仿真时间戳）
         self.start_time = None
         self.last_imu_time = 0
         self.last_camera_time = 0
@@ -78,18 +78,9 @@ class LunarRoverEnv:
         print(f"车辆 {self.vehicle_name} 初始化完成，手刹已拉起")
 
         # ==========================================
-        # 多线程图像采集初始化
+        # 同步模式配置（图像采集时暂停仿真）
         # ==========================================
-        self.img_queue = queue.Queue()
-        self.img_request_event = threading.Event()
-        self.img_stop_event = threading.Event()
-        # 线程锁，防止竞争
-        self.img_thread_lock = threading.Lock()
-        
-        # 启动图像采集线程
-        self.img_thread = threading.Thread(target=self._image_capture_thread, daemon=True)
-        self.img_thread.start()
-        print("图像采集线程已启动")
+        print("同步模式已启用：图像采集期间仿真将暂停，确保IMU时间戳连续")
         
     def _image_capture_thread(self):
         """
@@ -110,15 +101,15 @@ class LunarRoverEnv:
                     # 记录采集开始时的状态
                     capture_timestamp = time.time() - self.start_time
                     
-                    # 采集导航相机
-                    nav_data = self._capture_stereo_images_sync(thread_client, 'nav_camera', capture_timestamp)
+                    # 采集导航相机 [已注释 - 现阶段暂时用不到]
+                    # nav_data = self._capture_stereo_images_sync(thread_client, 'nav_camera', capture_timestamp)
                     
                     # 采集避障相机
                     obs_data = self._capture_stereo_images_sync(thread_client, 'obstacle_camera', capture_timestamp)
                     
                     # 将结果放入队列
                     result = {
-                        'nav_camera': nav_data,
+                        # 'nav_camera': nav_data,  # [已注释 - 现阶段暂时用不到]
                         'obstacle_camera': obs_data
                     }
                     self.img_queue.put(result)
@@ -135,7 +126,7 @@ class LunarRoverEnv:
         
         # 重置车辆位置
         self.client.reset()
-        time.sleep(2)
+        time.sleep(1)
         self.client.enableApiControl(False, self.vehicle_name)  # 禁用API控制，允许手动驾驶
         
         # 将车辆放置在地面上方0.5米，让其自然下落
@@ -151,7 +142,7 @@ class LunarRoverEnv:
         pose.orientation.z_val = 0
         
         self.client.simSetVehiclePose(pose, True, self.vehicle_name)
-        time.sleep(2)  # 等待车辆稳定
+        time.sleep(1)  # 等待车辆稳定
         
         # 验证车辆位置
         final_pose = self.client.simGetVehiclePose(self.vehicle_name)
@@ -159,8 +150,10 @@ class LunarRoverEnv:
         print(f"  位置: ({final_pose.position.x_val:.2f}, {final_pose.position.y_val:.2f}, {final_pose.position.z_val:.2f})")
         print(f"  Z值说明: AirSim中Z轴向下为正，当前Z={final_pose.position.z_val:.2f}m")
         
-        # 重置时间
-        self.start_time = time.time()
+        # 重置时间（记录起始时间戳）
+        # 获取 AirSim 的当前仿真时间戳（纳秒）
+        initial_state = self.client.getCarState(self.vehicle_name)
+        self.start_time = initial_state.timestamp / 1e9  # 转换为秒
         self.last_imu_time = 0
         self.last_camera_time = 0
         self.last_encoder_time = 0
@@ -308,8 +301,8 @@ class LunarRoverEnv:
         ang_vel = car_state.kinematics_estimated.angular_velocity
         angular_velocity = np.array([ang_vel.x_val, ang_vel.y_val, ang_vel.z_val])
         
-        # 时间戳
-        timestamp = time.time() - self.start_time
+        # 时间戳（使用 AirSim 的仿真时间）
+        timestamp = (car_state.timestamp / 1e9) - self.start_time
         
         state = {
             'timestamp': timestamp,
@@ -384,8 +377,13 @@ class LunarRoverEnv:
                                                         responses[3].width, responses[3].height)
             images['right_depth'] = depth_right
         
-        # 使用传入的时间戳
-        images['timestamp'] = timestamp
+        # 使用AirSim返回的图像时间戳（确保与IMU时间基准一致）
+        # 优先使用第一张有效图像的时间戳
+        if len(responses) > 0:
+            sim_timestamp_ns = responses[0].time_stamp
+            images['timestamp'] = (sim_timestamp_ns / 1e9) - self.start_time
+        else:
+            images['timestamp'] = timestamp
         
         return images
 
@@ -422,7 +420,7 @@ class LunarRoverEnv:
                               orientation.y_val, orientation.z_val])
         
         imu_data = {
-            'timestamp': time.time() - self.start_time,
+            'timestamp': (imu_data_raw.time_stamp / 1e9) - self.start_time,
             'linear_acceleration': linear_accel,
             'angular_velocity': angular_vel,
             'orientation': quaternion
@@ -432,16 +430,17 @@ class LunarRoverEnv:
     
     def get_wheel_encoder_data(self, dt=None):
         """
-        计算轮速编码器数据（考虑车体线速度和角速度）
+        计算轮速编码器数据（四个车轮各自的线速度）
         Args:
             dt: 自上次采样以来的时间间隔 (s)
         Returns:
-            encoder_data: 包含四个车轮速度的字典
+            encoder_data: 包含四个车轮线速度的字典
         
         注意：
-        - 转向时，左右车轮速度不同（外侧轮快，内侧轮慢）
-        - 使用差速模型：v_left = v_center - omega * track_width/2
+        - 轮速计测量每个车轮的线速度（m/s）
+        - 转向时，外侧轮速度快，内侧轮速度慢
         - 车轮布局：[front_left, front_right, rear_left, rear_right]
+        - 根据对接团队需求，输出线速度（不输出角速度）
         """
         # handling default dt if not provided (fallback)
         if dt is None:
@@ -454,7 +453,7 @@ class LunarRoverEnv:
         
         if self.last_position is None:
             self.last_position = current_pos
-            wheel_speeds = np.zeros(4)
+            wheel_linear_speeds = np.zeros(4)
         else:
             # 计算车体中心的线速度（水平面）
             displacement = np.linalg.norm(current_pos[:2] - self.last_position[:2])  # 只看XY平面
@@ -465,58 +464,46 @@ class LunarRoverEnv:
             yaw_rate = angular_velocity[2]  # rad/s，正值表示逆时针旋转
             
             # 车辆参数
-            wheel_radius = self.rover_params['wheel_radius']
             track_width = self.rover_params['track_width']  # 左右轮距
             
-            # 使用差速转向模型计算左右轮速度
+            # 使用差速转向模型计算左右轮的线速度
             # 转向时，外侧轮速度快，内侧轮速度慢
             # v_left = v_center - omega * (track_width / 2)
             # v_right = v_center + omega * (track_width / 2)
             left_linear_speed = linear_speed - yaw_rate * (track_width / 2.0)
             right_linear_speed = linear_speed + yaw_rate * (track_width / 2.0)
             
-            # 将线速度转换为轮子角速度 (rad/s)
-            left_angular_speed = left_linear_speed / wheel_radius
-            right_angular_speed = right_linear_speed / wheel_radius
-            
-            # 四轮速度：[front_left, front_right, rear_left, rear_right]
-            # 假设前后轮速度相同（简化模型，实际前轮可能有转向角影响）
-            wheel_speeds = np.array([
-                left_angular_speed,   # 前左
-                right_angular_speed,  # 前右
-                left_angular_speed,   # 后左
-                right_angular_speed   # 后右
+            # 四轮线速度：[front_left, front_right, rear_left, rear_right] (m/s)
+            # 假设前后轮速度相同（简化模型）
+            wheel_linear_speeds = np.array([
+                left_linear_speed,   # 前左
+                right_linear_speed,  # 前右
+                left_linear_speed,   # 后左
+                right_linear_speed   # 后右
             ])
             
-            # 前轮是转向轮，速度可能略有不同（因为转向角）
-            # 简化处理：前轮速度稍小（阿克曼转向效应）
-            wheel_speeds[0] *= 0.98  # 前左
-            wheel_speeds[1] *= 0.98  # 前右
+            # 前轮是转向轮，线速度可能略有不同（阿克曼转向效应）
+            wheel_linear_speeds[0] *= 0.98  # 前左
+            wheel_linear_speeds[1] *= 0.98  # 前右
             
             # 添加噪声（与速度成比例）
             for i in range(4):
-                if abs(wheel_speeds[i]) > 1e-6:  # 避免除以零
-                    noise = np.random.randn() * self.wheel_encoder_params['noise_std'] * abs(wheel_speeds[i])
-                    wheel_speeds[i] += noise
+                if abs(wheel_linear_speeds[i]) > 1e-6:  # 避免除以零
+                    noise = np.random.randn() * self.wheel_encoder_params['noise_std'] * abs(wheel_linear_speeds[i])
+                    wheel_linear_speeds[i] += noise
             
             # 模拟偶尔的打滑
             if np.random.rand() < self.wheel_encoder_params['slip_probability']:
                 slip_factor = np.random.uniform(*self.wheel_encoder_params['slip_factor_range'])
                 wheel_idx = np.random.randint(0, 4)
-                wheel_speeds[wheel_idx] *= slip_factor
-            
-            # 更新编码器计数（累积角度）
-            resolution = self.wheel_encoder_params['resolution']
-            wheel_rotations = wheel_speeds * dt / (2 * np.pi)  # 转过的圈数
-            self.wheel_encoder_counts += wheel_rotations * resolution  # 脉冲数
+                wheel_linear_speeds[wheel_idx] *= slip_factor
             
             self.last_position = current_pos
         
         encoder_data = {
-            'timestamp': time.time() - self.start_time,
-            'wheel_speeds': wheel_speeds,  # rad/s，四轮角速度
-            'encoder_counts': self.wheel_encoder_counts.copy(),  # 累积脉冲数
-            'dt': self.dt
+            'timestamp': current_state['timestamp'],
+            'wheel_linear_speeds': wheel_linear_speeds,  # m/s，四个车轮的线速度 [FL, FR, RL, RR]
+            'dt': dt
         }
         
         return encoder_data
@@ -553,11 +540,14 @@ class LunarRoverEnv:
     
     def step(self):
         """
-        执行一个时间步，返回采集的传感器数据
+        同步模式：执行一个时间步，返回采集的传感器数据
+        在图像采集期间暂停仿真，确保IMU时间戳连续
         Returns:
             data: 包含所有传感器数据的字典
         """
-        current_time = time.time() - self.start_time
+        # 使用 AirSim 的仿真时间戳
+        car_state = self.client.getCarState(self.vehicle_name)
+        current_time = (car_state.timestamp / 1e9) - self.start_time
         
         data = {
             'timestamp': current_time,
@@ -570,24 +560,23 @@ class LunarRoverEnv:
             data['imu'] = self.get_imu_data()
             self.last_imu_time = current_time
         
-        # 相机数据（低频采集，使用多线程）
+        # 相机数据（低频采集，同步模式）
         camera_rate = 1.0 / self.nav_camera_params['fps']
         if current_time - self.last_camera_time >= camera_rate:
-            # 只有当上一帧采集完成（request_event被清除）时才发起新请求
-            # 这样可以丢弃来不及处理的帧，保证实时性，而不阻塞主线程
-            if not self.img_request_event.is_set():
-                self.img_request_event.set()
+            # === 关键：暂停仿真，采集图像 ===
+            self.client.simPause(True)
+            
+            try:
+                # 直接同步采集图像（仿真已暂停，时间不会流逝）
+                data['obstacle_camera'] = self._capture_stereo_images_sync(
+                    self.client, 'obstacle_camera', current_time
+                )
                 self.last_camera_time = current_time
-            # else: 上一帧还没处理完，跳过这一帧（Drop frame）
-        
-        # 检查是否有图像数据返回
-        try:
-            # 取出所有已完成的图像
-            while not self.img_queue.empty():
-                img_result = self.img_queue.get_nowait()
-                data.update(img_result)
-        except queue.Empty:
-            pass
+            except Exception as e:
+                print(f"图像采集失败: {e}")
+            finally:
+                # === 恢复仿真 ===
+                self.client.simPause(False)
         
         # 轮速编码器数据
         encoder_rate = 1.0 / self.wheel_encoder_params['sampling_rate']
@@ -649,8 +638,9 @@ class LunarRoverEnv:
             dataset['data'].append(sensor_data)
             frame_count += 1
             
-            # 获取当前状态用于显示
-            current_time = time.time() - self.start_time
+            # 获取当前状态用于显示（使用 AirSim 的仿真时间）
+            current_state = self.get_current_state()
+            current_time = current_state['timestamp']
             current_distance = self.total_distance
             
             # 每2秒打印一次进度
@@ -658,22 +648,22 @@ class LunarRoverEnv:
                 current_state = self.get_current_state()
                 pos = current_state['position']
                 speed = current_state['speed']
-                print(f"[进度] 时长: {current_time:.1f}s | 距离: {current_distance:.1f}m | "
-                      f"帧数: {frame_count} | 位置: ({pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f}) | "
-                      f"速度: {speed:.2f}m/s")
+                print(f"[进度] 时长: {current_time:.1f}s | 距离: {current_distance:.4f}m | "
+                      f"帧数: {frame_count} | 位置: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}) | "
+                      f"速度: {speed:.4f}m/s")
                 last_print_time = time.time()
             
             # 检查停止条件
             should_stop = False
             stop_reason = ""
             
-            # if duration is not None and current_time >= duration:
-            #     should_stop = True
-            #     stop_reason = f"达到目标时长 {duration:.1f}秒"
+            if duration is not None and current_time >= duration:
+                should_stop = True
+                stop_reason = f"达到目标时长 {duration:.1f}秒"
             
-            # if distance is not None and current_distance >= distance:
-            #     should_stop = True
-            #     stop_reason = f"达到目标距离 {distance:.1f}米"
+            if distance is not None and current_distance >= distance:
+                should_stop = True
+                stop_reason = f"达到目标距离 {distance:.1f}米"
             
             if max_frames is not None and frame_count >= max_frames:
                 should_stop = True
@@ -685,8 +675,9 @@ class LunarRoverEnv:
             # 控制采集频率（使用配置的dt）
             time.sleep(self.dt)
         
-        # 记录最终统计信息
-        dataset['metadata']['actual_duration'] = time.time() - self.start_time
+        # 记录最终统计信息（使用 AirSim 的仿真时间）
+        final_state = self.get_current_state()
+        dataset['metadata']['actual_duration'] = final_state['timestamp']
         dataset['metadata']['actual_distance'] = self.total_distance
         dataset['metadata']['actual_frames'] = frame_count
         
@@ -696,12 +687,6 @@ class LunarRoverEnv:
         print(f"实际距离: {dataset['metadata']['actual_distance']:.1f}米")
         print(f"实际帧数: {dataset['metadata']['actual_frames']}帧")
         print(f"==================================\n")
-        
-        # 停止采集线程
-        self.img_stop_event.set()
-        # 触发一次请求以解除wait阻塞（如果线程正在等待）
-        self.img_request_event.set() 
-        self.img_thread.join(timeout=1.0)
         
         return dataset
 
