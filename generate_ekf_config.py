@@ -11,7 +11,7 @@ def generate_ekf_config():
     # 1. 基础参数配置
     # ==========================================
     config = {
-        "frequency": 30,                 # EKF 运行频率 (Hz)
+        "frequency": 10,                 # EKF 运行频率 (Hz)
         "sensor_timeout": 0.1,           # 传感器超时时间 (s)，超过此时间未收到数据则认为传感器失效
         "two_d_mode": False,             # 是否为2D平面运动？(月球表面起伏，建议False)
         "transform_time_offset": 0.0,    # 变换发布的时间偏移

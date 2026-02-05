@@ -25,9 +25,9 @@ args={'seed':50, # default=42
       'save_format':'both', # 数据集保存格式：'euroc', 'custom', 'rosbag', 'both'
       'num_runs':1, # 运行次数（生成多个数据集）
       'mode': 'manual', # 采集模式：'manual'(手动驾驶) 或 'auto'(自动导航，暂不可用)
-      'duration': 10, # 手动模式：采集时长(秒)，None表示不限制
-      'distance': 11.0, # 手动模式：采集距离(米)，None表示不限制
-      'max_frames': 50000 # 手动模式：最大帧数，None表示不限制
+      'duration': None, # 手动模式：采集时长(秒)，None表示不限制
+      'distance': 10.0, # 手动模式：采集距离(米)，None表示不限制
+      'max_frames': 100000 # 手动模式：最大帧数，None表示不限制
       }
 env_args = {'rover_params':cfg.rover_params,
         'nav_camera_params':cfg.nav_camera_params,

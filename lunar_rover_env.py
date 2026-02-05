@@ -61,6 +61,8 @@ class LunarRoverEnv:
         # 轮速编码器状态
         self.wheel_encoder_counts = np.zeros(4)  # 四个车轮的编码器计数
         self.last_position = None
+        self.last_dist_pos = None # 用于计算累计距离的上一位置
+        self.last_encoder_pos = None # 用于计算轮速计的上一位置
         
         # 时间戳（使用 AirSim 的仿真时间戳）
         self.start_time = None
@@ -136,10 +138,10 @@ class LunarRoverEnv:
         pose.position.z_val = -0.5  # Z轴向下为正，负值表示在地面上方
         
         # 设置朝向（四元数，朝向正X轴）
-        pose.orientation.w_val = 1.0
-        pose.orientation.x_val = 0
-        pose.orientation.y_val = 0
-        pose.orientation.z_val = 0
+        # pose.orientation.w_val = 1.0
+        # pose.orientation.x_val = 0
+        # pose.orientation.y_val = 0
+        # pose.orientation.z_val = 0
         
         self.client.simSetVehiclePose(pose, True, self.vehicle_name)
         time.sleep(1)  # 等待车辆稳定
@@ -162,6 +164,8 @@ class LunarRoverEnv:
         car_state = self.client.getCarState(self.vehicle_name)
         pos = car_state.kinematics_estimated.position
         self.last_position = np.array([pos.x_val, pos.y_val, pos.z_val])
+        self.last_dist_pos = self.last_position.copy()
+        self.last_encoder_pos = self.last_position.copy()
         
         # 重置传感器偏置
         self.accel_bias = np.random.randn(3) * self.imu_params['accel_bias_sigma']
@@ -282,11 +286,6 @@ class LunarRoverEnv:
         # 位置
         pos = car_state.kinematics_estimated.position
         position = np.array([pos.x_val, pos.y_val, pos.z_val])
-        
-        # 计算累计行驶距离
-        if self.last_position is not None:
-            displacement = np.linalg.norm(position[:2] - self.last_position[:2])
-            self.total_distance += displacement
         
         # 速度
         vel = car_state.kinematics_estimated.linear_velocity
@@ -451,12 +450,12 @@ class LunarRoverEnv:
         current_state = self.get_current_state()
         current_pos = current_state['position']
         
-        if self.last_position is None:
-            self.last_position = current_pos
+        if self.last_encoder_pos is None:
+            self.last_encoder_pos = current_pos
             wheel_linear_speeds = np.zeros(4)
         else:
             # 计算车体中心的线速度（水平面）
-            displacement = np.linalg.norm(current_pos[:2] - self.last_position[:2])  # 只看XY平面
+            displacement = np.linalg.norm(current_pos[:2] - self.last_encoder_pos[:2])  # 只看XY平面
             linear_speed = displacement / dt  # m/s
             
             # 获取车体角速度（yaw rate，绕Z轴旋转）
@@ -467,14 +466,10 @@ class LunarRoverEnv:
             track_width = self.rover_params['track_width']  # 左右轮距
             
             # 使用差速转向模型计算左右轮的线速度
-            # 转向时，外侧轮速度快，内侧轮速度慢
-            # v_left = v_center - omega * (track_width / 2)
-            # v_right = v_center + omega * (track_width / 2)
             left_linear_speed = linear_speed - yaw_rate * (track_width / 2.0)
             right_linear_speed = linear_speed + yaw_rate * (track_width / 2.0)
             
             # 四轮线速度：[front_left, front_right, rear_left, rear_right] (m/s)
-            # 假设前后轮速度相同（简化模型）
             wheel_linear_speeds = np.array([
                 left_linear_speed,   # 前左
                 right_linear_speed,  # 前右
@@ -482,13 +477,13 @@ class LunarRoverEnv:
                 right_linear_speed   # 后右
             ])
             
-            # 前轮是转向轮，线速度可能略有不同（阿克曼转向效应）
+            # 前轮是转向轮
             wheel_linear_speeds[0] *= 0.98  # 前左
             wheel_linear_speeds[1] *= 0.98  # 前右
             
-            # 添加噪声（与速度成比例）
+            # 添加噪声
             for i in range(4):
-                if abs(wheel_linear_speeds[i]) > 1e-6:  # 避免除以零
+                if abs(wheel_linear_speeds[i]) > 1e-6:
                     noise = np.random.randn() * self.wheel_encoder_params['noise_std'] * abs(wheel_linear_speeds[i])
                     wheel_linear_speeds[i] += noise
             
@@ -498,11 +493,11 @@ class LunarRoverEnv:
                 wheel_idx = np.random.randint(0, 4)
                 wheel_linear_speeds[wheel_idx] *= slip_factor
             
-            self.last_position = current_pos
+            self.last_encoder_pos = current_pos
         
         encoder_data = {
             'timestamp': current_state['timestamp'],
-            'wheel_linear_speeds': wheel_linear_speeds,  # m/s，四个车轮的线速度 [FL, FR, RL, RR]
+            'wheel_linear_speeds': wheel_linear_speeds,
             'dt': dt
         }
         
@@ -545,13 +540,20 @@ class LunarRoverEnv:
         Returns:
             data: 包含所有传感器数据的字典
         """
-        # 使用 AirSim 的仿真时间戳
-        car_state = self.client.getCarState(self.vehicle_name)
-        current_time = (car_state.timestamp / 1e9) - self.start_time
+        # 获取当前状态（每个step只调用一次 AirSim API 以保证数据一致性）
+        current_state = self.get_current_state()
+        current_time = current_state['timestamp']
+        current_pos = current_state['position']
         
+        # 更新累计距离
+        if self.last_dist_pos is not None:
+            displacement = np.linalg.norm(current_pos[:2] - self.last_dist_pos[:2])
+            self.total_distance += displacement
+        self.last_dist_pos = current_pos
+
         data = {
             'timestamp': current_time,
-            'state': self.get_current_state(),
+            'state': current_state
         }
         
         # IMU数据（高频采集）
@@ -638,18 +640,23 @@ class LunarRoverEnv:
             dataset['data'].append(sensor_data)
             frame_count += 1
             
-            # 获取当前状态用于显示（使用 AirSim 的仿真时间）
-            current_state = self.get_current_state()
-            current_time = current_state['timestamp']
+            # 使用 step() 中已经获取并计算好的数据
+            current_time = sensor_data['timestamp']
             current_distance = self.total_distance
             
             # 每2秒打印一次进度
             if time.time() - last_print_time > 2.0:
-                current_state = self.get_current_state()
+                # 使用已经采集到的数据，避免重复请求 API
+                current_state = sensor_data['state']
                 pos = current_state['position']
                 speed = current_state['speed']
+                
+                # 计算俯视图下的车体与 X 轴夹角 (Yaw)
+                yaw_rad = self.quaternion_to_yaw(current_state['quaternion'])
+                yaw_deg = np.degrees(yaw_rad)
+                
                 print(f"[进度] 时长: {current_time:.1f}s | 距离: {current_distance:.4f}m | "
-                      f"帧数: {frame_count} | 位置: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}) | "
+                      f"航向角(Yaw): {yaw_deg:.2f}° | 位置: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}) | "
                       f"速度: {speed:.4f}m/s")
                 last_print_time = time.time()
             

@@ -22,7 +22,7 @@ nav_camera_params = {
     'pitch_angle': 0,                      # 俯仰角 (度)
     'resolution': (752, 480),              # 图像分辨率 (width, height)
     'fov': 90,                             # 视场角 (度)
-    'fps': 5,                             # 采样频率 (Hz)
+    'fps': 2,                             # 采样频率 (Hz)，修改为2Hz左右
     'image_types': ['Scene', 'DepthPlanar', 'Segmentation'],  # 采集的图像类型
 }
 
@@ -35,7 +35,7 @@ obstacle_camera_params = {
     'pitch_angle': 15,                     # 俯仰角 (度，向下倾斜)
     'resolution': (640, 480),              # 图像分辨率 (width, height)
     'fov': 60,                             # 视场角 (度)
-    'fps': 5,                             # 采样频率 (Hz)
+    'fps': 2,                             # 采样频率 (Hz)，修改为2Hz左右
     'image_types': ['Scene', 'DepthPlanar'],  # 采集的图像类型
 }
 

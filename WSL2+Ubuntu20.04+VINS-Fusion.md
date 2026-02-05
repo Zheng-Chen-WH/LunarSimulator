@@ -218,6 +218,13 @@ evo_traj bag ~/output/fusion_result.bag /ground_truth/pose --save_as_tum
 evo_ape tum ground_truth_pose.tum vins_estimator_odometry.tum -vas --plot --save_plot vins_drift.png
 # 评估 EKF (应该不需要尺度对齐，直接 -va)
 evo_ape tum ground_truth_pose.tum odometry_filtered.tum -va --plot --save_plot ekf_fusion.png
+
+# 如果需要仅分析xoy平面内投影精度：
+# 使用 awk 将 TUM 文件的第 4 列（Z轴）强制清零，生成平底轨迹
+awk '{$4=0; print $0}' ground_truth_pose.tum > gt_xy.tum
+awk '{$4=0; print $0}' odometry_filtered.tum > odom_xy.tum
+# 然后分析这两个平面的轨迹
+evo_ape tum gt_xy.tum odom_xy.tum -va --plot --save_plot ekf_fusion_xy.png
 ```
 **EVO结果解释：**
 + **map图像**

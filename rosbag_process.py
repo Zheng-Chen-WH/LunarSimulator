@@ -7,13 +7,13 @@ from rosbags.typesys import Stores, get_typestore
 from rosbags.typesys import get_types_from_msg
 import csv
 
-args = {"task": "downsample",  # validate: 验证时间戳同步性（检查尺度漂移根源）
+args = {"task": "inspect",  # validate: 验证时间戳同步性（检查尺度漂移根源）
                             # interpolation： 时间戳归零并插值IMU
                             # downsample: 自动降采样图像频率
                             # inspect: 检查bag内容与完整性，不完整时需要fix
                             # fix: 修复序列号不完整的bag文件
                             # extract: 导出bag内容为csv文件，需要配合topic使用
-        "path_in": r"D:\Codes\LunarSimulator\dataset\S_turn_trajectory\dataset_S_turn.bag",    # 输入bag路径，例:r"D:\Codes\LunarSimulator\dataset\20260115_153825\dataset_final.bag"
+        "path_in": r"D:\Codes\LunarSimulator\dataset\two_turns_trajectory\dataset_two_turns_downsampled.bag",    # 输入bag路径，例:r"D:\Codes\LunarSimulator\dataset\20260115_153825\dataset_final.bag"
                             # None表示自动在dataset文件夹下查找最新
         "path_out": None,    # 输出bag路径，None表示自动生成
         "topic": "/ground_truth/pose",    # 仅在task为extract时使用，指定导出话题
