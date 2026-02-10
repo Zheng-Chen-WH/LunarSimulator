@@ -35,6 +35,9 @@ class DatasetSaver:
         
         self.save_format = self.dataset_params['save_format']
         
+        # 计算避障相机图像裁剪参数（从70°×70°裁剪为target FOV）
+        self._compute_obstacle_crop_params()
+        
     def save_dataset(self, dataset, format_type=None):
         """
         保存数据集
@@ -64,6 +67,66 @@ class DatasetSaver:
         
         print(f"数据集已保存到: {self.dataset_path}")
     
+    def _compute_obstacle_crop_params(self):
+        """
+        计算避障相机图像裁剪参数
+        AirSim采集70°×70°正方形图像，根据target_fov裁剪为目标视场角
+        """
+        obs_params = self.obstacle_camera_params
+        
+        # 获取AirSim采集参数
+        width, height = obs_params['resolution']  # (840, 840)
+        fov = obs_params['fov']  # 70°
+        
+        # 获取目标视场角
+        target_fov_h = obs_params.get('target_fov_h', fov)  # 默认70°
+        target_fov_v = obs_params.get('target_fov_v', fov)  # 默认49°
+        
+        # 计算裁剪后的分辨率
+        # 水平方向：如果target_fov_h < fov，则需要裁剪，否则保持原分辨率
+        # 垂直方向：如果target_fov_v < fov，则需要裁剪
+        # FOV与像素数成正比（小角度近似）
+        
+        # 目标像素数（基于FOV比例）
+        target_width = int(width * target_fov_h / fov)
+        target_height = int(height * target_fov_v / fov)
+        
+        # 计算裁剪边界（居中裁剪）
+        crop_left = (width - target_width) // 2
+        crop_top = (height - target_height) // 2
+        crop_right = crop_left + target_width
+        crop_bottom = crop_top + target_height
+        
+        self.obstacle_crop = {
+            'enabled': (target_width != width or target_height != height),
+            'original_resolution': (width, height),
+            'target_resolution': (target_width, target_height),
+            'target_fov': (target_fov_h, target_fov_v),
+            'crop_box': (crop_left, crop_top, crop_right, crop_bottom)  # (left, top, right, bottom)
+        }
+        
+        if self.obstacle_crop['enabled']:
+            print(f"避障相机图像裁剪配置:")
+            print(f"  原始分辨率: {width}×{height} (FOV {fov}°×{fov}°)")
+            print(f"  目标分辨率: {target_width}×{target_height} (FOV {target_fov_h}°×{target_fov_v}°)")
+            print(f"  裁剪区域: ({crop_left}, {crop_top}, {crop_right}, {crop_bottom})")
+        else:
+            print(f"避障相机图像无需裁剪: {width}×{height}")
+    
+    def _crop_obstacle_image(self, img):
+        """
+        裁剪避障相机图像
+        Args:
+            img: numpy数组，图像数据
+        Returns:
+            裁剪后的图像
+        """
+        if not self.obstacle_crop['enabled']:
+            return img
+        
+        left, top, right, bottom = self.obstacle_crop['crop_box']
+        return img[top:bottom, left:right]
+
     def save_euroc_format(self, dataset):
         """
         保存为EuRoC MAV数据集格式
@@ -146,14 +209,18 @@ class DatasetSaver:
                 if 'left_rgb' in obs_data:
                     filename = f"{cam_ts}.png"
                     img_path = mav_path / "cam2" / "data" / filename
-                    cv2.imwrite(str(img_path), cv2.cvtColor(obs_data['left_rgb'], cv2.COLOR_RGB2BGR))
+                    # 裁剪图像
+                    img_cropped = self._crop_obstacle_image(obs_data['left_rgb'])
+                    cv2.imwrite(str(img_path), cv2.cvtColor(img_cropped, cv2.COLOR_RGB2BGR))
                     cam_csv_files['cam2'].write(f"{cam_ts},{filename}\n")
                 
                 # cam3: 避障右
                 if 'right_rgb' in obs_data:
                     filename = f"{cam_ts}.png"
                     img_path = mav_path / "cam3" / "data" / filename
-                    cv2.imwrite(str(img_path), cv2.cvtColor(obs_data['right_rgb'], cv2.COLOR_RGB2BGR))
+                    # 裁剪图像
+                    img_cropped = self._crop_obstacle_image(obs_data['right_rgb'])
+                    cv2.imwrite(str(img_path), cv2.cvtColor(img_cropped, cv2.COLOR_RGB2BGR))
                     cam_csv_files['cam3'].write(f"{cam_ts},{filename}\n")
             
             # 保存IMU数据
@@ -217,8 +284,10 @@ class DatasetSaver:
         
         nav_K = get_camera_intrinsics(self.nav_camera_params['resolution'],
                                       self.nav_camera_params['fov'])
-        obs_K = get_camera_intrinsics(self.obstacle_camera_params['resolution'],
-                                      self.obstacle_camera_params['fov'])
+        # 避障相机使用裁剪后的分辨率计算内参
+        obs_crop_res = self.obstacle_crop['target_resolution']
+        obs_target_fov = self.obstacle_crop['target_fov']
+        obs_K = get_camera_intrinsics(obs_crop_res, obs_target_fov[0])  # 使用横向FOV
         
         # 相机外参（相对于IMU）
         sensor_config = {
@@ -246,7 +315,7 @@ class DatasetSaver:
                 'distortion_model': 'radtan',
                 'distortion_coefficients': [0.0, 0.0, 0.0, 0.0],
                 'T_cam_imu': self.get_camera_extrinsics('obstacle', 'left'),
-                'resolution': list(self.obstacle_camera_params['resolution']),
+                'resolution': list(obs_crop_res),  # 使用裁剪后的分辨率
                 'timeshift_cam_imu': 0.0
             },
             'cam3': {
@@ -255,7 +324,7 @@ class DatasetSaver:
                 'distortion_model': 'radtan',
                 'distortion_coefficients': [0.0, 0.0, 0.0, 0.0],
                 'T_cam_imu': self.get_camera_extrinsics('obstacle', 'right'),
-                'resolution': list(self.obstacle_camera_params['resolution']),
+                'resolution': list(obs_crop_res),  # 使用裁剪后的分辨率
                 'timeshift_cam_imu': 0.0
             }
         }
@@ -447,14 +516,18 @@ class DatasetSaver:
                 obs_data = data_frame['obstacle_camera']
                 if 'left_rgb' in obs_data:
                     img_path = f"obstacle_camera_left/{idx:06d}.png"
+                    # 裁剪图像
+                    img_cropped = self._crop_obstacle_image(obs_data['left_rgb'])
                     cv2.imwrite(str(self.dataset_path / img_path),
-                              cv2.cvtColor(obs_data['left_rgb'], cv2.COLOR_RGB2BGR))
+                              cv2.cvtColor(img_cropped, cv2.COLOR_RGB2BGR))
                     frame_info['obstacle_left'] = img_path
                 
                 if 'right_rgb' in obs_data:
                     img_path = f"obstacle_camera_right/{idx:06d}.png"
+                    # 裁剪图像
+                    img_cropped = self._crop_obstacle_image(obs_data['right_rgb'])
                     cv2.imwrite(str(self.dataset_path / img_path),
-                              cv2.cvtColor(obs_data['right_rgb'], cv2.COLOR_RGB2BGR))
+                              cv2.cvtColor(img_cropped, cv2.COLOR_RGB2BGR))
                     frame_info['obstacle_right'] = img_path
             
             # 保存IMU数据
@@ -674,7 +747,8 @@ class DatasetSaver:
                     cam_timestamp_ns = int(obs_data['timestamp'] * 1e9)
                     
                     if 'left_rgb' in obs_data:
-                        img = obs_data['left_rgb']
+                        # 裁剪图像
+                        img = self._crop_obstacle_image(obs_data['left_rgb'])
                         height, width = img.shape[:2]
                         
                         header = std_msgs_Header(
@@ -699,7 +773,8 @@ class DatasetSaver:
                         writer.write(conn_obs_left, cam_timestamp_ns, typestore.serialize_ros1(img_msg, img_msg.__msgtype__))
                     
                     if 'right_rgb' in obs_data:
-                        img = obs_data['right_rgb']
+                        # 裁剪图像
+                        img = self._crop_obstacle_image(obs_data['right_rgb'])
                         height, width = img.shape[:2]
                         
                         header = std_msgs_Header(

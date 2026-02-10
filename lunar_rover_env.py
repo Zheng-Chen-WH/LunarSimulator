@@ -100,8 +100,9 @@ class LunarRoverEnv:
                 
                 # 开始采集
                 try:
-                    # 记录采集开始时的状态
-                    capture_timestamp = time.time() - self.start_time
+                    # 获取 AirSim 当前仿真时间戳
+                    car_state = thread_client.getCarState(self.vehicle_name)
+                    capture_timestamp = (car_state.timestamp / 1e9) - self.start_time
                     
                     # 采集导航相机 [已注释 - 现阶段暂时用不到]
                     # nav_data = self._capture_stereo_images_sync(thread_client, 'nav_camera', capture_timestamp)
@@ -352,16 +353,26 @@ class LunarRoverEnv:
         
         images = {}
         
+        # 目标分辨率（软件超采样后的输出分辨率）
+        target_width = 840
+        target_height = 840
+        
         # 左相机RGB
         if responses[0].width > 0:
             img_left = np.frombuffer(responses[0].image_data_uint8, dtype=np.uint8)
             img_left = img_left.reshape(responses[0].height, responses[0].width, 3)
+            # 如果采集分辨率高于目标分辨率，进行缩小（软件超采样）
+            if responses[0].width > target_width:
+                img_left = cv2.resize(img_left, (target_width, target_height), interpolation=cv2.INTER_AREA)
             images['left_rgb'] = img_left
         
         # 右相机RGB
         if responses[1].width > 0:
             img_right = np.frombuffer(responses[1].image_data_uint8, dtype=np.uint8)
             img_right = img_right.reshape(responses[1].height, responses[1].width, 3)
+            # 如果采集分辨率高于目标分辨率，进行缩小（软件超采样）
+            if responses[1].width > target_width:
+                img_right = cv2.resize(img_right, (target_width, target_height), interpolation=cv2.INTER_AREA)
             images['right_rgb'] = img_right
         
         # 左相机深度
@@ -376,13 +387,10 @@ class LunarRoverEnv:
                                                         responses[3].width, responses[3].height)
             images['right_depth'] = depth_right
         
-        # 使用AirSim返回的图像时间戳（确保与IMU时间基准一致）
-        # 优先使用第一张有效图像的时间戳
-        if len(responses) > 0:
-            sim_timestamp_ns = responses[0].time_stamp
-            images['timestamp'] = (sim_timestamp_ns / 1e9) - self.start_time
-        else:
-            images['timestamp'] = timestamp
+        # 使用传入的 AirSim 仿真时间戳
+        # 注意：responses[0].time_stamp 使用系统时钟，不受 simPause 影响
+        # 因此必须使用传入的 timestamp（来自 get_current_state 的仿真时间）
+        images['timestamp'] = timestamp
         
         return images
 
@@ -390,7 +398,9 @@ class LunarRoverEnv:
         """
         [弃用/兼容] 原始同步采集方法
         """
-        timestamp = time.time() - self.start_time
+        # 使用 AirSim 仿真时间戳
+        car_state = self.client.getCarState(self.vehicle_name)
+        timestamp = (car_state.timestamp / 1e9) - self.start_time
         return self._capture_stereo_images_sync(self.client, camera_name_prefix, timestamp)
     
     def get_imu_data(self):
@@ -565,11 +575,11 @@ class LunarRoverEnv:
         # 相机数据（低频采集，同步模式）
         camera_rate = 1.0 / self.nav_camera_params['fps']
         if current_time - self.last_camera_time >= camera_rate:
-            # === 关键：暂停仿真，采集图像 ===
+            # 暂停仿真，采集图像
             self.client.simPause(True)
             
             try:
-                # 直接同步采集图像（仿真已暂停，时间不会流逝）
+                # 同步采集图像（仿真已暂停，时间不会流逝）
                 data['obstacle_camera'] = self._capture_stereo_images_sync(
                     self.client, 'obstacle_camera', current_time
                 )
@@ -577,7 +587,7 @@ class LunarRoverEnv:
             except Exception as e:
                 print(f"图像采集失败: {e}")
             finally:
-                # === 恢复仿真 ===
+                # 恢复仿真
                 self.client.simPause(False)
         
         # 轮速编码器数据

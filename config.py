@@ -22,7 +22,7 @@ nav_camera_params = {
     'pitch_angle': 0,                      # 俯仰角 (度)
     'resolution': (752, 480),              # 图像分辨率 (width, height)
     'fov': 90,                             # 视场角 (度)
-    'fps': 2,                             # 采样频率 (Hz)，修改为2Hz左右
+    'fps': 1,                             # 采样频率 (Hz)，修改为2Hz左右
     'image_types': ['Scene', 'DepthPlanar', 'Segmentation'],  # 采集的图像类型
 }
 
@@ -33,9 +33,11 @@ obstacle_camera_params = {
     'x_offset': 0.2,                       # 相机距车体中心前向偏移 (m)
     'z_offset': 0.3,                       # 相机距车体中心垂向偏移 (m)
     'pitch_angle': 15,                     # 俯仰角 (度，向下倾斜)
-    'resolution': (640, 480),              # 图像分辨率 (width, height)
-    'fov': 60,                             # 视场角 (度)
-    'fps': 2,                             # 采样频率 (Hz)，修改为2Hz左右
+    'resolution': (840, 840),              # AirSim采集分辨率 (width, height)，正方形FOV 70°×70°
+    'fov': 70,                             # AirSim FOV (度)，横向
+    'target_fov_h': 70,                    # 目标横向视场角 (度)
+    'target_fov_v': 49,                    # 目标纵向视场角 (度)
+    'fps': 2,                              # 采样频率 (Hz)
     'image_types': ['Scene', 'DepthPlanar'],  # 采集的图像类型
 }
 
