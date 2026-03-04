@@ -4,3 +4,4 @@ runs/
 *.tfevents.*
 dataset/
 __pycache__/
+Documents/

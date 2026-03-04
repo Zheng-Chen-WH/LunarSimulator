@@ -13,6 +13,7 @@ from datetime import datetime
 import cv2
 from pathlib import Path
 import yaml
+import math
 
 class DatasetSaver:
     def __init__(self, args):
@@ -82,14 +83,13 @@ class DatasetSaver:
         target_fov_h = obs_params.get('target_fov_h', fov)  # 默认70°
         target_fov_v = obs_params.get('target_fov_v', fov)  # 默认49°
         
-        # 计算裁剪后的分辨率
-        # 水平方向：如果target_fov_h < fov，则需要裁剪，否则保持原分辨率
-        # 垂直方向：如果target_fov_v < fov，则需要裁剪
-        # FOV与像素数成正比（小角度近似）
-        
-        # 目标像素数（基于FOV比例）
-        target_width = int(width * target_fov_h / fov)
-        target_height = int(height * target_fov_v / fov)
+        # 计算裁剪后的分辨率（使用三角函数精确计算）
+        # 焦距 fx = (width/2) / tan(fov/2)
+        # 目标像素 = 2 * fx * tan(target_fov/2)
+        import math
+        fx = (width / 2.0) / math.tan(math.radians(fov / 2.0))
+        target_width = round(2 * fx * math.tan(math.radians(target_fov_h / 2.0))) if target_fov_h < fov else width
+        target_height = round(2 * fx * math.tan(math.radians(target_fov_v / 2.0))) if target_fov_v < fov else height
         
         # 计算裁剪边界（居中裁剪）
         crop_left = (width - target_width) // 2
@@ -277,57 +277,86 @@ class DatasetSaver:
     
     def save_sensor_yaml(self, mav_path):
         """
-        保存传感器配置YAML文件（EuRoC格式）
+        保存传感器配置YAML文件（标准EuRoC格式）
+        
+        参数来源原则：
+        - 外参（位置/旋转）：从 settings.json 读取，位置÷20
+        - 内参（焦距/主点）：FOV 从 settings.json 读取，分辨率使用实际输出尺寸
+        - 裁剪参数（target_fov）：从 config.py 读取
+        
+        T_cam_imu 约定：body_T_cam = T_{imu←optical}，即将相机光学坐标系中的点
+        变换到 IMU/车体坐标系。与 VINS-Fusion 的 body_T_cam 一致。
         """
-        # 计算相机内参
-        from config import get_camera_intrinsics
+        settings = self.load_airsim_settings()
+        vehicle = settings.get("Vehicles", {}).get("LunarRover", {}) if settings else {}
+        cameras = vehicle.get("Cameras", {})
         
-        nav_K = get_camera_intrinsics(self.nav_camera_params['resolution'],
-                                      self.nav_camera_params['fov'])
-        # 避障相机使用裁剪后的分辨率计算内参
-        obs_crop_res = self.obstacle_crop['target_resolution']
-        obs_target_fov = self.obstacle_crop['target_fov']
-        obs_K = get_camera_intrinsics(obs_crop_res, obs_target_fov[0])  # 使用横向FOV
+        # 相机映射: cam_id → (settings.json候选名, 类型, 侧)
+        camera_defs = [
+            ('cam0', ['nav_camera_left', 'nav_left', 'cam0'], 'nav', 'left'),
+            ('cam1', ['nav_camera_right', 'nav_right', 'cam1'], 'nav', 'right'),
+            ('cam2', ['obstacle_camera_left', 'obstacle_left', 'cam2'], 'obstacle', 'left'),
+            ('cam3', ['obstacle_camera_right', 'obstacle_right', 'cam3'], 'obstacle', 'right'),
+        ]
         
-        # 相机外参（相对于IMU）
-        sensor_config = {
-            'cam0': {
+        sensor_config = {}
+        print("从 settings.json 读取相机内参/外参（标准EuRoC body_T_cam 格式）...")
+        
+        for cam_id, name_candidates, cam_type, side in camera_defs:
+            # 在 settings.json 中查找相机
+            cam_data = None
+            for name in name_candidates:
+                if name in cameras:
+                    cam_data = cameras[name]
+                    break
+            
+            # 从 settings.json 读取 FOV 和分辨率
+            if cam_data:
+                cap_settings = cam_data.get("CaptureSettings", [{}])
+                if isinstance(cap_settings, list) and len(cap_settings) > 0:
+                    cap_settings = cap_settings[0]
+                raw_width = cap_settings.get("Width", 840)
+                raw_height = cap_settings.get("Height", 840)
+                fov_deg = cap_settings.get("FOV_Degrees", 90)
+            else:
+                # 回退到 config.py
+                if cam_type == 'obstacle':
+                    raw_width, raw_height = self.obstacle_camera_params['resolution']
+                    fov_deg = self.obstacle_camera_params['fov']
+                else:
+                    raw_width, raw_height = self.nav_camera_params['resolution']
+                    fov_deg = self.nav_camera_params['fov']
+            
+            # 确定输出分辨率（避障相机需要裁剪）
+            if cam_type == 'obstacle' and self.obstacle_crop['enabled']:
+                out_width, out_height = self.obstacle_crop['target_resolution']
+            else:
+                out_width, out_height = raw_width, raw_height
+            
+            # 从 settings.json FOV 计算内参
+            # fx 由采集 FOV 和采集宽度决定（裁剪不改变焦距）
+            fx = raw_width / (2.0 * math.tan(math.radians(fov_deg / 2.0)))
+            fy = fx  # 正方形像素
+            cx = out_width / 2.0
+            cy = out_height / 2.0
+            # 注：裁剪后的 out_width/out_height 是偶数最优（对称裁剪），但此处 round 结果可能为奇数
+            # cx/cy 取 out_width/2.0（浮点）确保几何中心正确
+            
+            # 获取外参 (body_T_cam，含光学坐标系变换)
+            T_cam_imu = self.get_camera_extrinsics_from_settings(cam_type, side)
+            
+            sensor_config[cam_id] = {
                 'camera_model': 'pinhole',
-                'intrinsics': [nav_K[0][0], nav_K[1][1], nav_K[0][2], nav_K[1][2]],
+                'intrinsics': [fx, fy, cx, cy],
                 'distortion_model': 'radtan',
                 'distortion_coefficients': [0.0, 0.0, 0.0, 0.0],
-                'T_cam_imu': self.get_camera_extrinsics('nav', 'left'),
-                'resolution': list(self.nav_camera_params['resolution']),
-                'timeshift_cam_imu': 0.0
-            },
-            'cam1': {
-                'camera_model': 'pinhole',
-                'intrinsics': [nav_K[0][0], nav_K[1][1], nav_K[0][2], nav_K[1][2]],
-                'distortion_model': 'radtan',
-                'distortion_coefficients': [0.0, 0.0, 0.0, 0.0],
-                'T_cam_imu': self.get_camera_extrinsics('nav', 'right'),
-                'resolution': list(self.nav_camera_params['resolution']),
-                'timeshift_cam_imu': 0.0
-            },
-            'cam2': {
-                'camera_model': 'pinhole',
-                'intrinsics': [obs_K[0][0], obs_K[1][1], obs_K[0][2], obs_K[1][2]],
-                'distortion_model': 'radtan',
-                'distortion_coefficients': [0.0, 0.0, 0.0, 0.0],
-                'T_cam_imu': self.get_camera_extrinsics('obstacle', 'left'),
-                'resolution': list(obs_crop_res),  # 使用裁剪后的分辨率
-                'timeshift_cam_imu': 0.0
-            },
-            'cam3': {
-                'camera_model': 'pinhole',
-                'intrinsics': [obs_K[0][0], obs_K[1][1], obs_K[0][2], obs_K[1][2]],
-                'distortion_model': 'radtan',
-                'distortion_coefficients': [0.0, 0.0, 0.0, 0.0],
-                'T_cam_imu': self.get_camera_extrinsics('obstacle', 'right'),
-                'resolution': list(obs_crop_res),  # 使用裁剪后的分辨率
+                'T_cam_imu': T_cam_imu,
+                'resolution': [out_width, out_height],
                 'timeshift_cam_imu': 0.0
             }
-        }
+            
+            print(f"  {cam_id} ({cam_type}_{side}): FOV={fov_deg}°, "
+                  f"res={out_width}x{out_height}, fx={fx:.2f}, cy={cy:.1f}")
         
         # 保存YAML
         sensor_yaml_path = mav_path / "sensor.yaml"
@@ -336,9 +365,111 @@ class DatasetSaver:
         
         print(f"传感器配置已保存到: {sensor_yaml_path}")
     
+    def load_airsim_settings(self):
+        """从用户文档目录加载 AirSim settings.json"""
+        target_path = r"C:\Users\zchenkf\Documents\AirSim\settings.json"
+        
+        try:
+            with open(target_path, 'r', encoding='utf-8') as f:
+                settings_str = f.read()
+                lines = settings_str.split('\n')
+                clean_lines = [l for l in lines if not l.strip().startswith("//")]
+                clean_json = '\n'.join(clean_lines)
+                return json.loads(clean_json)
+        except Exception as e:
+            print(f"Warning: 无法读取 settings.json: {e}")
+            return None
+
+    def get_camera_extrinsics_from_settings(self, camera_type, side):
+        """
+        从 settings.json 获取相机外参：body_T_cam = T_{imu←optical}
+        
+        计算流程：
+        1. 从 settings.json 读取相机位置 (÷20) 和旋转角（左右相机独立定义，不叠加baseline）
+        2. 构造 T_vehicle_from_cambody（AirSim NED body frame）
+        3. 应用 T_cambody_from_optical 将 AirSim 相机体坐标系转换为标准光学坐标系
+        4. 返回 T_imu_from_optical = T_vehicle_from_cambody @ T_cambody_from_optical
+           （IMU在车体原点，故 T_imu = T_vehicle）
+        
+        坐标系说明：
+        - AirSim 相机体坐标系: X-forward, Y-right, Z-down (NED)
+        - 标准光学坐标系: X-right, Y-down, Z-forward (OpenCV)
+        """
+        settings = self.load_airsim_settings()
+        if settings is None:
+            return self.get_camera_extrinsics(camera_type, side)
+        
+        vehicle = settings.get("Vehicles", {}).get("LunarRover", {})
+        cameras = vehicle.get("Cameras", {})
+        
+        # 确定相机名称映射（左右相机在settings.json中独立定义完整坐标）
+        if camera_type == 'obstacle':
+            if side == 'left':
+                names = ["obstacle_left", "obstacle_camera_left", "haz_left", "cam2"]
+            else:
+                names = ["obstacle_right", "obstacle_camera_right", "haz_right", "cam3"]
+        else:
+            if side == 'left':
+                names = ["nav_left", "nav_camera_left", "cam0"]
+            else:
+                names = ["nav_right", "nav_camera_right", "cam1"]
+        
+        # 查找相机
+        cam_data = None
+        for name in names:
+            if name in cameras:
+                cam_data = cameras[name]
+                break
+        
+        if cam_data is None:
+            print(f"Warning: 在 settings.json 中未找到相机 {camera_type}_{side}，使用config.py配置")
+            return self.get_camera_extrinsics(camera_type, side)
+        
+        # 提取并转换（除以 20）- 直接使用settings.json中的完整坐标
+        x = cam_data.get("X", 0) / 20.0
+        y = cam_data.get("Y", 0) / 20.0
+        z = cam_data.get("Z", 0) / 20.0
+        roll = math.radians(cam_data.get("Roll", 0))
+        pitch = math.radians(cam_data.get("Pitch", 0))
+        yaw = math.radians(cam_data.get("Yaw", 0))
+        
+        # 构造旋转矩阵 R_vehicle_from_cambody（Z-Y-X欧拉角：Yaw-Pitch-Roll）
+        cy_r, sy_r = math.cos(yaw), math.sin(yaw)
+        cp_r, sp_r = math.cos(pitch), math.sin(pitch)
+        cr_r, sr_r = math.cos(roll), math.sin(roll)
+        
+        R = np.array([
+            [cy_r*cp_r, cy_r*sp_r*sr_r - sy_r*cr_r, cy_r*sp_r*cr_r + sy_r*sr_r],
+            [sy_r*cp_r, sy_r*sp_r*sr_r + cy_r*cr_r, sy_r*sp_r*cr_r - cy_r*sr_r],
+            [-sp_r, cp_r*sr_r, cp_r*cr_r]
+        ])
+        
+        # T_vehicle_from_cambody
+        T_vehicle_from_cambody = np.eye(4)
+        T_vehicle_from_cambody[:3, :3] = R
+        T_vehicle_from_cambody[:3, 3] = [x, y, z]
+        
+        # AirSim camera body → optical frame 变换矩阵
+        # 将光学坐标系的点变换到 AirSim 相机体坐标系:
+        #   cambody_X(forward) = optical_Z(forward)
+        #   cambody_Y(right)   = optical_X(right)
+        #   cambody_Z(down)    = optical_Y(down)
+        R_cambody_from_optical = np.array([
+            [0, 0, 1],
+            [1, 0, 0],
+            [0, 1, 0]
+        ])
+        T_cambody_from_optical = np.eye(4)
+        T_cambody_from_optical[:3, :3] = R_cambody_from_optical
+        
+        # body_T_cam = T_imu_from_optical = T_vehicle_from_cambody @ T_cambody_from_optical
+        T_imu_from_optical = T_vehicle_from_cambody @ T_cambody_from_optical
+        
+        return T_imu_from_optical.flatten().tolist()
+
     def get_camera_extrinsics(self, camera_type, side):
         """
-        获取相机外参矩阵（相对于IMU）
+        获取相机外参矩阵（相对于IMU）- 从config.py的硬编码参数
         Args:
             camera_type: 'nav' 或 'obstacle'
             side: 'left' 或 'right'

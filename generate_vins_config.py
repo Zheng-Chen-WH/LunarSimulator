@@ -3,6 +3,19 @@ import numpy as np
 import os
 import math
 
+# ======================== 可修改参数 ========================
+# 数据集路径: 设为有效路径则自动估算 IMU 噪声，设为 None 则使用下方默认值
+DATASET_PATH = "dataset/DOF"
+
+# IMU 噪声默认值 (仅当 DATASET_PATH=None 或估算失败时使用)
+DEFAULT_IMU_NOISE = {
+    "acc_n": 0.03,
+    "gyr_n": 0.005,
+    "acc_w": 0.003,
+    "gyr_w": 0.0005,
+}
+# ============================================================
+
 def euler_to_rotation_matrix(roll, pitch, yaw):
     """
     Convert Euler angles (in degrees, AirSim convention) to Rotation Matrix.
@@ -56,6 +69,22 @@ def inverse_transform(T):
     return T_inv
 
 def main():
+    # 从数据集自动估算 IMU 噪声
+    imu_noise_params = None
+    if DATASET_PATH and os.path.exists(os.path.join(DATASET_PATH, "mav0", "imu0", "data.csv")):
+        print(f"\n从数据集估算 IMU 噪声参数: {DATASET_PATH}")
+        try:
+            from estimate_imu_noise import estimate_from_dataset
+            result = estimate_from_dataset(DATASET_PATH)
+            imu_noise_params = {k: result[k] for k in ("acc_n", "gyr_n", "acc_w", "gyr_w")}
+        except Exception as e:
+            print(f"  估算失败 ({e})，使用默认值")
+    else:
+        if DATASET_PATH:
+            print(f"数据集路径无效: {DATASET_PATH}，使用默认噪声参数")
+        else:
+            print("未指定数据集路径，使用默认噪声参数")
+
     # Paths - Prioritize the user's specific path
     target_path = r"c:\Users\zchenkf\Documents\AirSim\settings.json"
     local_path = os.path.join("Documents", "settings.json")
@@ -159,22 +188,36 @@ def main():
              else:
                 cap_settings = {}
                 
-        width = cap_settings.get("Width", 840)
-        height = cap_settings.get("Height", 840)
+        raw_width = cap_settings.get("Width", 840)
+        raw_height = cap_settings.get("Height", 840)
         fov_deg = cap_settings.get("FOV_Degrees", 90)
         
-        fx = (width / 2.0) / math.tan(math.radians(fov_deg / 2.0))
+        # 计算裁剪后的分辨率（避障相机从正方形裁剪为目标FOV）
+        # 从 config.py 读取裁剪目标
+        try:
+            from config import obstacle_camera_params
+            target_fov_h = obstacle_camera_params.get('target_fov_h', fov_deg)
+            target_fov_v = obstacle_camera_params.get('target_fov_v', fov_deg)
+            # 使用三角函数精确计算裁剪像素数: pixels = 2 * fx * tan(target_fov/2)
+            _fx = (raw_width / 2.0) / math.tan(math.radians(fov_deg / 2.0))
+            out_width = round(2 * _fx * math.tan(math.radians(target_fov_h / 2.0))) if target_fov_h < fov_deg else raw_width
+            out_height = round(2 * _fx * math.tan(math.radians(target_fov_v / 2.0))) if target_fov_v < fov_deg else raw_height
+        except ImportError:
+            out_width, out_height = raw_width, raw_height
+        
+        # 焦距由采集FOV和采集宽度决定（裁剪不改变焦距）
+        fx = (raw_width / 2.0) / math.tan(math.radians(fov_deg / 2.0))
         fy = fx 
-        cx = width / 2.0
-        cy = height / 2.0
+        cx = out_width / 2.0
+        cy = out_height / 2.0
 
         cam_filename = f"cam{cam['id']}.yaml"
         with open(cam_filename, 'w') as f:
             f.write(f"%YAML:1.0\n---\n")
             f.write("model_type: PINHOLE\n")
             f.write(f"camera_name: camera\n")
-            f.write(f"image_width: {width}\n")
-            f.write(f"image_height: {height}\n")
+            f.write(f"image_width: {out_width}\n")
+            f.write(f"image_height: {out_height}\n")
             f.write("distortion_parameters:\n")
             f.write("   k1: 0.0\n   k2: 0.0\n   p1: 0.0\n   p2: 0.0\n")
             f.write("projection_parameters:\n")
@@ -185,10 +228,10 @@ def main():
         
         print(f"Generated {cam_filename}")
 
-        # Extrinsics
-        c_x = cam_data.get("X", 0)
-        c_y = cam_data.get("Y", 0)
-        c_z = cam_data.get("Z", 0)
+        # Extrinsics (除以20转换为实际物理尺寸)
+        c_x = cam_data.get("X", 0) / 20.0
+        c_y = cam_data.get("Y", 0) / 20.0
+        c_z = cam_data.get("Z", 0) / 20.0
         c_r = cam_data.get("Roll", 0)
         c_p = cam_data.get("Pitch", 0)
         c_y_aw = cam_data.get("Yaw", 0)
@@ -217,8 +260,19 @@ def main():
                  cap_s = left_cam_data.get("CaptureSettings", [{}])
                  if isinstance(cap_s, list) and len(cap_s) > 0: cap_s = cap_s[0]
                  elif isinstance(cap_s, list): cap_s = {}
-                 w = cap_s.get("Width", 840)
-                 h = cap_s.get("Height", 840)
+                 raw_w = cap_s.get("Width", 840)
+                 raw_h = cap_s.get("Height", 840)
+                 raw_fov = cap_s.get("FOV_Degrees", 90)
+                 # 使用裁剪后的分辨率
+                 try:
+                     from config import obstacle_camera_params as _obs_params
+                     _tfh = _obs_params.get('target_fov_h', raw_fov)
+                     _tfv = _obs_params.get('target_fov_v', raw_fov)
+                     _fx = (raw_w / 2.0) / math.tan(math.radians(raw_fov / 2.0))
+                     w = round(2 * _fx * math.tan(math.radians(_tfh / 2.0))) if _tfh < raw_fov else raw_w
+                     h = round(2 * _fx * math.tan(math.radians(_tfv / 2.0))) if _tfv < raw_fov else raw_h
+                 except ImportError:
+                     w, h = raw_w, raw_h
                  f.write(f"image_width: {w}\n")
                  f.write(f"image_height: {h}\n\n")
 
@@ -240,6 +294,11 @@ def main():
                             f.write("\n          ")
                 f.write("]\n\n")
 
+            # IMU 噪声参数：优先从数据集估算，否则使用默认值
+            imu_noise = dict(DEFAULT_IMU_NOISE)
+            if imu_noise_params is not None:
+                imu_noise.update(imu_noise_params)
+
             f.write("# Optimization & IMU Defaults\n")
             f.write("multiple_thread: 1\n")
             f.write("max_cnt: 150\n")
@@ -250,13 +309,13 @@ def main():
             f.write("flow_back: 1\n\n")
             f.write("max_solver_time: 0.04\n")
             f.write("max_num_iterations: 8\n")
-            f.write("keyframe_parallax: 3.0\n\n")  # 降低关键帧视差阈值，适应极低速运动
-            f.write("acc_n: 0.004\n")
-            f.write("gyr_n: 0.002\n")
-            f.write("acc_w: 0.0004\n")
-            f.write("gyr_w: 0.0002\n")
+            f.write("keyframe_parallax: 3.0\n\n")
+            f.write(f"acc_n: {imu_noise['acc_n']:.6f}\n")
+            f.write(f"gyr_n: {imu_noise['gyr_n']:.6f}\n")
+            f.write(f"acc_w: {imu_noise['acc_w']:.6f}\n")
+            f.write(f"gyr_w: {imu_noise['gyr_w']:.6f}\n")
             f.write("g_norm: 9.81\n\n")
-            f.write("estimate_td: 1\n")
+            f.write("estimate_td: 0\n")
             f.write("td: 0.0\n")
         
         print(f"Generated {vio_filename}")

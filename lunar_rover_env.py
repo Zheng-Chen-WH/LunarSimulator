@@ -23,6 +23,18 @@ import copy
     多行缩进：tab
     关闭多行缩进：选中多行shift+tab'''
 
+def spin_wait(seconds):
+    """
+    精确忙等替代 time.sleep()
+    Windows 的 time.sleep() 最小粒度约 15.6ms，无法实现 <16ms 的短暂停。
+    用 perf_counter 忙等可将轮询频率从 ~64Hz 提升到 ~120Hz+。
+    CPU 占用会增加，但对数据采集脚本来说可以接受。
+    """
+    end = time.perf_counter() + seconds
+    while time.perf_counter() < end:
+        pass
+
+
 class LunarRoverEnv:
     def __init__(self, args):
         """
@@ -80,9 +92,11 @@ class LunarRoverEnv:
         print(f"车辆 {self.vehicle_name} 初始化完成，手刹已拉起")
 
         # ==========================================
-        # 同步模式配置（图像采集时暂停仿真）
+        # 图像采集模式：RGB-only（不采深度）
         # ==========================================
-        print("同步模式已启用：图像采集期间仿真将暂停，确保IMU时间戳连续")
+        # simPause 对 PhysXCar 无效，去掉 DepthPlanar 后 RGB 仅 ~63ms
+        # 2Hz 采集时 IMU 保留率 88%（56Hz / 63.6Hz baseline）
+        print("RGB-only 模式已启用：去掉 DepthPlanar (460ms→63ms)，IMU 保留率 88%")
         
     def _image_capture_thread(self):
         """
@@ -176,6 +190,9 @@ class LunarRoverEnv:
         # 记录起始位置（用于计算行驶距离）
         self.start_position = self.last_position.copy()
         self.total_distance = 0.0
+        
+        # IMU 去重：记录上一次实际写入的 IMU 时间戳（纳秒级）
+        self.last_imu_ts_ns = 0
         
         print(f"环境重置完成，手动驾驶模式已启用")
         print(f"请使用键盘/手柄控制车辆，程序将在后台采集传感器数据")
@@ -318,35 +335,28 @@ class LunarRoverEnv:
     
     def _capture_stereo_images_sync(self, client, camera_name_prefix, timestamp):
         """
-        [内部方法] 同步采集双目图像（RGB + 深度）
-        由后台线程调用
+        [内部方法] 同步采集双目 RGB 图像（不采深度）
+        
+        性能分析结果 (profile_capture.py):
+          - 双目 RGB:   ~63ms  → 2Hz 时 IMU 保留率 88%
+          - 双目 Depth: ~460ms → 2Hz 时 IMU 直接崩到 1.9Hz
+        VIO (VINS-Fusion) 只需要 RGB，不需要 DepthPlanar。
+        
         Args:
-            client: 线程专用的AirSim客户端
+            client: AirSim 客户端
             camera_name_prefix: 'nav_camera' 或 'obstacle_camera'
             timestamp: 采集时间戳
         Returns:
-            images: 包含左右相机RGB图像和深度图的字典
+            images: 包含左右相机 RGB 图像的字典
         """
-        # 请求左右相机的RGB图像
+        # 只请求 RGB，不请求 DepthPlanar（460ms → 63ms）
         rgb_requests = [
             airsim.ImageRequest(f"{camera_name_prefix}_left", airsim.ImageType.Scene, False, False),
             airsim.ImageRequest(f"{camera_name_prefix}_right", airsim.ImageType.Scene, False, False),
         ]
         
-        # 请求左右相机的深度图像
-        depth_requests = [
-            airsim.ImageRequest(f"{camera_name_prefix}_left", airsim.ImageType.DepthPlanar, True, False),
-            airsim.ImageRequest(f"{camera_name_prefix}_right", airsim.ImageType.DepthPlanar, True, False),
-        ]
-        
         try:
-            # 分别获取RGB和深度图像
-            rgb_responses = client.simGetImages(rgb_requests, self.vehicle_name)
-            depth_responses = client.simGetImages(depth_requests, self.vehicle_name)
-            
-            # 合并响应
-            responses = rgb_responses + depth_responses
-            
+            responses = client.simGetImages(rgb_requests, self.vehicle_name)
         except Exception as e:
             print(f"获取图像失败: {e}")
             raise
@@ -361,7 +371,6 @@ class LunarRoverEnv:
         if responses[0].width > 0:
             img_left = np.frombuffer(responses[0].image_data_uint8, dtype=np.uint8)
             img_left = img_left.reshape(responses[0].height, responses[0].width, 3)
-            # 如果采集分辨率高于目标分辨率，进行缩小（软件超采样）
             if responses[0].width > target_width:
                 img_left = cv2.resize(img_left, (target_width, target_height), interpolation=cv2.INTER_AREA)
             images['left_rgb'] = img_left
@@ -370,26 +379,10 @@ class LunarRoverEnv:
         if responses[1].width > 0:
             img_right = np.frombuffer(responses[1].image_data_uint8, dtype=np.uint8)
             img_right = img_right.reshape(responses[1].height, responses[1].width, 3)
-            # 如果采集分辨率高于目标分辨率，进行缩小（软件超采样）
             if responses[1].width > target_width:
                 img_right = cv2.resize(img_right, (target_width, target_height), interpolation=cv2.INTER_AREA)
             images['right_rgb'] = img_right
         
-        # 左相机深度
-        if responses[2].width > 0:
-            depth_left = airsim.list_to_2d_float_array(responses[2].image_data_float, 
-                                                    responses[2].width, responses[2].height)
-            images['left_depth'] = depth_left
-        
-        # 右相机深度
-        if responses[3].width > 0:
-            depth_right = airsim.list_to_2d_float_array(responses[3].image_data_float,
-                                                        responses[3].width, responses[3].height)
-            images['right_depth'] = depth_right
-        
-        # 使用传入的 AirSim 仿真时间戳
-        # 注意：responses[0].time_stamp 使用系统时钟，不受 simPause 影响
-        # 因此必须使用传入的 timestamp（来自 get_current_state 的仿真时间）
         images['timestamp'] = timestamp
         
         return images
@@ -566,29 +559,27 @@ class LunarRoverEnv:
             'state': current_state
         }
         
-        # IMU数据（高频采集）
-        imu_rate = 1.0 / self.imu_params['sampling_rate']
-        if current_time - self.last_imu_time >= imu_rate:
-            data['imu'] = self.get_imu_data()
-            self.last_imu_time = current_time
+        # IMU数据（每次都采集，按时间戳去重）
+        # 去掉频率门控：门控 + spin_wait(5ms) 导致 ~5.5ms 循环周期
+        # 在 8.33ms tick 边界上约 45% 概率跳过一个 tick → 出现大量 16.66ms 间隔
+        # 改为每次采样、按 AirSim 纳秒时间戳去重，保证不丢失任何 tick
+        imu_data = self.get_imu_data()
+        imu_ts_ns = int(imu_data['timestamp'] * 1e9)
+        if imu_ts_ns != self.last_imu_ts_ns:
+            data['imu'] = imu_data
+            self.last_imu_ts_ns = imu_ts_ns
         
-        # 相机数据（低频采集，同步模式）
-        camera_rate = 1.0 / self.nav_camera_params['fps']
+        # 相机数据（低频采集，RGB-only 无需暂停仿真）
+        # simPause 对 PhysXCar 模式无效（已验证），且去掉 Depth 后采集仅 ~63ms
+        camera_rate = 1.0 / self.obstacle_camera_params['fps']
         if current_time - self.last_camera_time >= camera_rate:
-            # 暂停仿真，采集图像
-            self.client.simPause(True)
-            
             try:
-                # 同步采集图像（仿真已暂停，时间不会流逝）
                 data['obstacle_camera'] = self._capture_stereo_images_sync(
                     self.client, 'obstacle_camera', current_time
                 )
                 self.last_camera_time = current_time
             except Exception as e:
                 print(f"图像采集失败: {e}")
-            finally:
-                # 恢复仿真
-                self.client.simPause(False)
         
         # 轮速编码器数据
         encoder_rate = 1.0 / self.wheel_encoder_params['sampling_rate']
@@ -690,7 +681,9 @@ class LunarRoverEnv:
                 break
             
             # 控制采集频率（使用配置的dt）
-            time.sleep(self.dt)
+            # 注意：time.sleep() 在 Windows 上最小粒度 ~15.6ms，
+            # 会导致轮询频率被限制在 ~64Hz，丢失 120Hz IMU 的一半数据
+            spin_wait(self.dt)
         
         # 记录最终统计信息（使用 AirSim 的仿真时间）
         final_state = self.get_current_state()
